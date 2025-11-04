@@ -19,8 +19,10 @@ private:
 	int camera_width;
 	int camera_height;
 	std::string save_folder;
-	DataQueue<cv::Mat> queue;
 	DataQueue<std::pair<const Metavision::EventCD* , const Metavision::EventCD*> > raw_queue;
+	// +++ 添加这两个成员来替换 cv::Mat 队列 +++
+	std::mutex m_frame_mutex;   // 用于保护 m_latest_frame 的互斥锁
+	cv::Mat m_latest_frame;     // 用于存储GUI要读取的最新帧
 public:
 	DVS();
 	~DVS();

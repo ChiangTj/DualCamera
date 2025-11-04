@@ -1,4 +1,4 @@
-#include "../include/RGB.h"
+#include "RGB.h"
 #include <H5Cpp.h> // 引入 HDF5 C++ API
 #include <memory>  // 引入 std::make_unique
 
@@ -277,7 +277,7 @@ void RGB::stopCapture()
 
     // 2. Wake up threads that might be waiting
     image_semaphore.notifyAll(); // (from your .h) 唤醒 distributeTasksThread
-    hdf5_write_queue.stopWait(); // +++ ADDED: 唤醒 hdf5_writer_thread (假设 DataQueue 有此方法)
+    //hdf5_write_queue.stopWait(); // +++ ADDED: 唤醒 hdf5_writer_thread (假设 DataQueue 有此方法)
     // 如果 DataQueue 没有，hdf5_writer_thread 中的 is_saving 检查会处理
 
 // 3. Join threads (order matters: consumers first)
@@ -458,8 +458,6 @@ void RGB::processAndQueueFrame(ImageNode* image_node)
         std::lock_guard<std::mutex> lock(display_mutex);
         display_stack.push(p_frame->frame); // 推送深拷贝的帧
     }
-
-    // (旧的: cv::imwrite(...) - 已移除)
 
     // 4. 清理
     free(local_rgb_buffer);
