@@ -13,6 +13,8 @@
 #include <mutex>
 #include <condition_variable>
 #include <thread>
+#include <H5Cpp.h> // +++ ADDED: 引入 HDF5 C++ API
+#include <memory>  // +++ ADDED: 引入 smart pointers
 
 class RGB {
 public:
@@ -48,6 +50,13 @@ private:
         }
     };
 
+    // +++ ADDED: 新结构体，用于存放已处理好、待写入HDF5的帧
+    struct ProcessedFrame {
+        cv::Mat frame;       // BGR 格式的 cv::Mat
+        unsigned int frame_number;
+    };
+
+    // (Semaphore class is unchanged)
     class Semaphore {
     public:
         explicit Semaphore(long initial_count = 0) : count(initial_count) {}
@@ -116,16 +125,25 @@ private:
     MV_CC_SAVE_IMAGE_PARAM image_save_params;
 
     // ==================== Threading ====================
-    std::thread save_thread;
+    // std::thread save_thread; // <<< CHANGED: 我们将用 hdf5_writer_thread 替换
+    std::thread hdf5_writer_thread; // +++ ADDED: 专用的HDF5写入线程
     std::mutex task_mutex;
     std::mutex display_mutex;
     Semaphore image_semaphore;
     std::vector<std::thread> worker_threads;
     std::queue<std::function<void()>> task_queue;
     std::condition_variable task_cv;
+
     // ==================== Data Structures ====================
-    DataQueue<ImageNode*> image_queue;
+    DataQueue<ImageNode*> image_queue; // L1 (Callback) -> L2 (Distributor) 的队列
+    DataQueue<ProcessedFrame*> hdf5_write_queue; // +++ ADDED: L3 (Pool) -> L4 (HDF5 Writer) 的队列
     LimitedStack<cv::Mat> display_stack{ 3 };
+
+    // ==================== HDF5 Members ====================
+    std::unique_ptr<H5::H5File> h5_file; // +++ ADDED: HDF5 文件句柄
+    H5::DataSet h5_rgb_dataset;         // +++ ADDED: HDF5 图像数据集
+    hsize_t h5_rgb_dims[4];             // +++ ADDED: 图像数据集维度
+    std::mutex h5_mutex;                // +++ ADDED: 保护HDF5文件操作（主要在开关时）
 
     // ==================== Private Methods ====================
     // Initialization
@@ -138,17 +156,28 @@ private:
     // Resource management
     void cleanupResources();
     void clearImageQueue();
+    void clearHDF5Queue();
 
     // Thread functions
     static void imageCallback(unsigned char* image_data, MV_FRAME_OUT_INFO_EX* frame_info, void* user_data);
-    void saveImagesThread();
-    void processAndSaveImage(ImageNode* image_node);
+
+    // <<< CHANGED: 这是线程池的新任务
+    void processAndQueueFrame(ImageNode* image_node); // +++ ADDED
+
+    // <<< REPLACED: 旧的保存函数 (将在 .cpp 中被 processAndQueueFrame 替换)
+    // void processAndSaveImage(ImageNode* image_node); 
+
+    // +++ ADDED: HDF5 写入线程的主循环
+    void hdf5WriteLoop();
+
+    // +++ ADDED: HDF5 辅助函数
+    bool initializeHDF5(const std::string& base_path);
+    void extendAndWriteHDF5(ProcessedFrame* frame);
+    void closeHDF5();
 
     // Disallow copying
     RGB(const RGB&) = delete;
     RGB& operator=(const RGB&) = delete;
-
-
 
 };
 

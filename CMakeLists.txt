@@ -1,15 +1,15 @@
-cmake_minimum_required(VERSION 3.10)
+ï»¿cmake_minimum_required(VERSION 3.10)
 
 project(DualCamera LANGUAGES CXX) 
 
-# ¡¾optional¡¿ÉèÖÃ¹¤³Ì°üº¬µ±Ç°Ä¿Â¼£¬·Ç±ØĞë
+# ã€optionalã€‘è®¾ç½®å·¥ç¨‹åŒ…å«å½“å‰ç›®å½•ï¼Œéå¿…é¡»
 SET(CMAKE_INCLUDE_CURRENT_DIR ON) 
 
-# ÉèÖÃ×Ô¶¯Éú³ÉmocÎÄ¼ş,AUTOMOC´ò¿ª¿ÉÒÔÊ¡È¥QT5_WRAP_CPPÃüÁî
+# è®¾ç½®è‡ªåŠ¨ç”Ÿæˆmocæ–‡ä»¶,AUTOMOCæ‰“å¼€å¯ä»¥çœå»QT5_WRAP_CPPå‘½ä»¤
 SET(CMAKE_AUTOMOC ON)
-# ÉèÖÃ×Ô¶¯Éú³Éui.hÎÄ¼ş,AUTOUIC´ò¿ª¿ÉÒÔÊ¡È¥QT5_WRAP_UIÃüÁî
+# è®¾ç½®è‡ªåŠ¨ç”Ÿæˆui.hæ–‡ä»¶,AUTOUICæ‰“å¼€å¯ä»¥çœå»QT5_WRAP_UIå‘½ä»¤
 SET(CMAKE_AUTOUIC ON)
-# ¡¾optional¡¿ÉèÖÃ×Ô¶¯´¦Àí.qrcÎÄ¼ş
+# ã€optionalã€‘è®¾ç½®è‡ªåŠ¨å¤„ç†.qrcæ–‡ä»¶
 SET(CMAKE_AUTORCC ON)
 
 set(CMAKE_BUILD_TYPE Release)
@@ -20,16 +20,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(MV_LIB_DIR "C:/Program Files (x86)/MVS/Development/Libraries/win64")
 set(MV_INCLUDE_DIR "C:/Program Files (x86)/MVS/Development/Includes")
 
-
 list(APPEND CMAKE_PREFIX_PATH "D:/Prophesee/share/cmake/hdf5_ecf"
 "D:/Prophesee/share/cmake/MetavisionHAL"
 "D:/Prophesee/share/cmake/MetavisionSDK")
+
+set(HDF5_DIR "D:/anaconda/Library/cmake")
 
 find_package(MetavisionSDK COMPONENTS core driver ui REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Qt5 COMPONENTS Widgets Core Gui REQUIRED)
 message(STATUS "Qt5 DIR: ${Qt5_DIR}")
 find_package(OpenMP REQUIRED)
+find_package(HDF5 COMPONENTS C CXX REQUIRED)
 
 aux_source_directory(./src BASE_SOURCE)
 
@@ -38,6 +40,7 @@ add_executable(dualcamera ${BASE_SOURCE} main.cpp)
 target_include_directories(dualcamera PUBLIC 
     ${OpenCV_INCLUDE_DIRS}
     ${MV_INCLUDE_DIR}
+    ${HDF5_INCLUDE_DIRS}
 )
 
 target_link_libraries(dualcamera 
@@ -49,4 +52,6 @@ target_link_libraries(dualcamera
     MetavisionSDK::driver 
     MetavisionSDK::ui
     ${MV_LIB_DIR}/MvCameraControl.lib
+    ${HDF5_CXX_LIBRARIES}
+    ${HDF5_C_LIBRARIES}
 )
