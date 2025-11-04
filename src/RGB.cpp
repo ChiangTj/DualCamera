@@ -1,4 +1,4 @@
-#include "../include/RGB.h"
+#include "RGB.h"
 #include <H5Cpp.h> // 引入 HDF5 C++ API
 #include <memory>  // 引入 std::make_unique
 
@@ -458,8 +458,6 @@ void RGB::processAndQueueFrame(ImageNode* image_node)
         std::lock_guard<std::mutex> lock(display_mutex);
         display_stack.push(p_frame->frame); // 推送深拷贝的帧
     }
-
-    // (旧的: cv::imwrite(...) - 已移除)
 
     // 4. 清理
     free(local_rgb_buffer);

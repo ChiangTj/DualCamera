@@ -1,120 +1,167 @@
-#include "../include/Gui.h"
+ï»¿#include "Gui.h" 
+#include <QDir>
 
 GUI::GUI(QWidget* parent) : QMainWindow(parent) {
-    //´´½¨´°¿Ú
-    is_running = false;
-    setWindowTitle("DualCamera");
-    resize(QSize(1920, 920));
-    QFont font;
-    font.setPointSize(15);
-    setFont(font);
+	is_running = false;
+	setWindowTitle("DualCamera");
+	resize(QSize(1920, 920));
+	QFont font;
+	font.setPointSize(15);
+	setFont(font);
 
-    buttonLayout = new QHBoxLayout();
-    mainLayout = new QVBoxLayout();
-    viewLayout = new QHBoxLayout();
-    datasetLayout = new QHBoxLayout();
+	buttonLayout = new QHBoxLayout();
+	mainLayout = new QVBoxLayout();
+	viewLayout = new QHBoxLayout();
+	datasetLayout = new QHBoxLayout();
 
-    view_DVS = new QLabel();
+	view_DVS = new QLabel("DVS Feed (Waiting...)");
+	view_RGB = new QLabel("RGB Feed (Waiting...)");
 
-    view_RGB = new QLabel();
-    //ÊäÈëÊý¾Ý¼¯Ãû³ÆµÄÎÄ±¾¿ò
-    QLabel* datasetLabel = new QLabel(tr("Dataset Name:"));
-    datasetInput = new QLineEdit();
-    datasetInput->setPlaceholderText("Enter dataset name");
-    datasetLayout->addWidget(datasetLabel);
-    datasetLayout->addWidget(datasetInput);
-    //´´½¨¿ªÊ¼Â¼ÖÆºÍÍ£Ö¹µÄ´°¿Ú
-    auto openCameraButton = new QPushButton(tr("open camera"));
-    auto stopButton = new QPushButton(tr("stop record"));
-    stopButton->setCheckable(true);
-    auto mainWidget = new QWidget();
-    
-    buttonLayout->addWidget(openCameraButton);
-    buttonLayout->addWidget(stopButton);
-    viewLayout->addWidget(view_DVS);
-    viewLayout->addWidget(view_RGB);
+	view_DVS->setMinimumSize(640, 540);
+	view_RGB->setMinimumSize(640, 540);
+	view_DVS->setScaledContents(true);
+	view_RGB->setScaledContents(true);
+	view_DVS->setFrameStyle(QFrame::Panel | QFrame::Sunken);
+	view_RGB->setFrameStyle(QFrame::Panel | QFrame::Sunken);
 
-    mainLayout->addLayout(viewLayout);
-    mainLayout->addLayout(datasetLayout);
-    mainLayout->addLayout(buttonLayout);
-    mainWidget->setLayout(mainLayout);
-    setCentralWidget(mainWidget);
 
-    //Á¬½Óµ½Á½¸ö°´Å¥
-    connect(openCameraButton, &QPushButton::clicked, this, &GUI::start);
+	QLabel* datasetLabel = new QLabel(tr("Dataset Name:"));
+	datasetInput = new QLineEdit();
+	datasetInput->setPlaceholderText("Enter dataset name");
+	datasetLayout->addWidget(datasetLabel);
+	datasetLayout->addWidget(datasetInput);
 
-    connect(stopButton, &QPushButton::clicked, this,
-        &GUI::stoprecord);
-}
+	auto openCameraButton = new QPushButton(tr("Open Camera (Start)"));
+	auto stopButton = new QPushButton(tr("Stop Record"));
+	stopButton->setCheckable(true);
 
-//Æô¶¯Â¼ÖÆ
-void GUI::start() {
-    //´´½¨Êý¾Ý¼¯ÎÄ¼þ¼Ð
-    std::string dataset_name = datasetInput->text().toStdString();
-    if (dataset_name.empty()) {
-        QMessageBox::warning(this, "Warning", "Please enter a dataset name!");
-        return;
-    }
-    std::string folder_path = "./" + dataset_name;
-    QDir().mkpath(QString::fromStdString(folder_path));
+	buttonLayout->addWidget(openCameraButton);
+	buttonLayout->addWidget(stopButton);
+	viewLayout->addWidget(view_DVS);
+	viewLayout->addWidget(view_RGB);
 
-    std::lock_guard<std::mutex> lock(mutex);
-    //is_runningÎª³ÌÐòÔËÐÐ±êÖ¾
-    if (!is_running) {
-        is_running = true;
-        dvs.start(dataset_name);//dvs¿ªÊ¼Â¼ÖÆ
-        rgb.startCapture(folder_path);//RGB¿ªÊ¼Â¼ÖÆ
-        uno.start();//µ¥Æ¬»ú¿ªÊ¼Êä³ö·½²¨¿ØÖÆÐÅºÅ
-        //·ÖÀëDVSºÍRGBµÄÏß³Ì
-        DVS_thread = std::thread(&GUI::updateDVS, this);
-        RGB_thread = std::thread(&GUI::updateRGB, this);
-        DVS_thread.detach();
-        RGB_thread.detach();
-    }
-}
+	mainLayout->addLayout(viewLayout);
+	mainLayout->addLayout(datasetLayout);
+	mainLayout->addLayout(buttonLayout);
 
-//ÊµÊ±ÏÔÊ¾DVS»­Ãæ 
-void GUI::updateDVS() {
+	auto mainWidget = new QWidget();
+	mainWidget->setLayout(mainLayout);
+	setCentralWidget(mainWidget);
 
-    cv::Size dsize = cv::Size(640, 540);
-    cv::Mat temp;
-    cv::Mat frame;
-    while (is_running) {
-        temp = dvs.getFrame(); //dvsÂ·»áÍ¨¹ýÀÛ»ýµÄ·½Ê½»ñµÃÖ¡
-        cv::resize(temp, frame, dsize, 0, 0, cv::INTER_AREA);
-        auto qimg = QImage(frame.data, frame.cols, frame.rows, frame.step, QImage::Format_RGB888);
-        view_DVS->setPixmap(QPixmap::fromImage(qimg).scaledToWidth(view_DVS->width()));
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-}
+	connect(openCameraButton, &QPushButton::clicked, this, &GUI::start);
+	connect(stopButton, &QPushButton::clicked, this, &GUI::stoprecord);
 
-//ÊµÊ±ÏÔÊ¾RGBÂ·Í¼Ïñ£¬µ«ÊÇ´æÔÚÒ»Ð©ÎÊÌâ£¬»á¿¨ËÀ¡¢
-void GUI::updateRGB() {
-    cv::Mat frame;
-    cv::Mat temp;
-    cv::Size dsize = cv::Size(640, 540);
+	m_dvs_display_timer = new QTimer(this);
+	m_rgb_display_timer = new QTimer(this);
 
-    while (is_running) {
-        rgb.getLatestFrame(&temp);
-        if (!temp.empty()) {
-            cv::resize(temp, frame, dsize, 0, 0, cv::INTER_AREA);
-            auto qimg = QImage(frame.data, frame.cols, frame.rows, frame.step, QImage::Format_RGB888);
-            view_RGB->setPixmap(QPixmap::fromImage(qimg).scaledToWidth(view_RGB->width()));
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(33));  // ¿ØÖÆÔ¼30fps
-    }
-}
-//³ÌÐò½áÊø
-void GUI::stoprecord() {
-    uno.stop();
-    dvs.stopRecord();
-    rgb.stopCapture();
-
+	connect(m_dvs_display_timer, &QTimer::timeout, this, &GUI::updateDvsDisplaySlot);
+	connect(m_rgb_display_timer, &QTimer::timeout, this, &GUI::updateRgbDisplaySlot);
 }
 
 GUI::~GUI() {
+	if (is_running) {
+		stoprecord();
+	}
+}
+
+void GUI::start() {
+	std::string dataset_name = datasetInput->text().toStdString();
+	if (dataset_name.empty()) {
+		QMessageBox::warning(this, "Warning", "Please enter a dataset name!");
+		return;
+	}
+
+	std::string folder_path = "../" + dataset_name;
+	QDir().mkpath(QString::fromStdString(folder_path));
+
+	std::lock_guard<std::mutex> lock(mutex);
+
+	if (!is_running) {
+		is_running = true;
+
+		dvs.start(dataset_name);
+		rgb.startCapture(folder_path);
+		uno.start();
+
+		m_dvs_display_timer->start(10);
+		m_rgb_display_timer->start(33);
+
+		qDebug() << "Capture started. GUI timers running.";
+	}
+}
+
+void GUI::stoprecord() {
+	std::lock_guard<std::mutex> lock(mutex);
+
+	if (is_running) {
+		is_running = false;
+
+		m_dvs_display_timer->stop();
+		m_rgb_display_timer->stop();
+
+		uno.stop();
+		dvs.stopRecord();
+		rgb.stopCapture();
+
+		qDebug() << "Capture stopped. GUI timers stopped.";
+		view_DVS->setText("DVS Feed (Stopped)");
+		view_RGB->setText("RGB Feed (Stopped)");
+	}
+}
+
+void GUI::updateDvsDisplaySlot() {
+	if (!is_running) return;
+
+	cv::Mat temp;
+	temp = dvs.getFrame();
+
+	if (temp.empty()) {
+		return;
+	}
+
+	cv::Mat frame;
+	cv::Size dsize = cv::Size(640, 540);
+	cv::resize(temp, frame, dsize, 0, 0, cv::INTER_AREA);
+
+	auto qimg = QImage(frame.data,
+		frame.cols,
+		frame.rows,
+		static_cast<int>(frame.step),
+		QImage::Format_RGB888);
+
+	view_DVS->setPixmap(QPixmap::fromImage(qimg));
+}
+
+
+void GUI::updateRgbDisplaySlot() {
+	if (!is_running) return;
+
+	cv::Mat temp_bgr_frame;
+	rgb.getLatestFrame(&temp_bgr_frame);
+
+	if (temp_bgr_frame.empty()) {
+		return;
+	}
+
+	cv::Mat resized_bgr_frame;
+	cv::Mat display_rgb_frame;
+	cv::Size dsize = cv::Size(640, 540);
+	cv::resize(temp_bgr_frame, resized_bgr_frame, dsize, 0, 0, cv::INTER_AREA);
+
+	cv::cvtColor(resized_bgr_frame, display_rgb_frame, cv::COLOR_BGR2RGB);
+
+	auto qimg = QImage(display_rgb_frame.data,
+		display_rgb_frame.cols,
+		display_rgb_frame.rows,
+		static_cast<int>(display_rgb_frame.step),
+		QImage::Format_RGB888);
+
+	view_RGB->setPixmap(QPixmap::fromImage(qimg));
 }
 
 void GUI::closeEvent(QCloseEvent* event) {
-    _exit(0);
+	if (is_running) {
+		stoprecord();
+	}
+	event->accept();
 }
