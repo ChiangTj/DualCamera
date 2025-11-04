@@ -1,4 +1,4 @@
-#include "../include/Uno.h"
+#include "Uno.h"
 
 UNO::UNO() {
     portName = "\\\\.\\COM3";
