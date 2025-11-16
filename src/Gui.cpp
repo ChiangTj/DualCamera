@@ -1,17 +1,22 @@
-﻿#include "../include/Gui.h" // 确保这是我们新设计的 Gui.h
-#include <opencv2/imgproc.hpp> // 用于 cv::cvtColor
+﻿#include "../include/Gui.h"
+#include <opencv2/imgproc.hpp>
 #include <QApplication>
 #include <QDir>
 #include <QMessageBox>
+#include <QDebug>
+#include <H5Cpp.h> // 必须包含 HDF5 头文件以读取回放数据
 
-// --- 1. 构造函数：初始化 UI 和状态 ---
+// =========================================================
+// 1. 构造函数：初始化 UI 和状态
+// =========================================================
 
 GUI::GUI(QWidget* parent)
     : QMainWindow(parent),
     m_currentState(AppState::Idle),
     m_segmentCounter(0),
     m_playbackIndex(0),
-    m_pythonProcess(nullptr) // 初始化 QProcess
+    m_pythonProcess(nullptr),
+    m_processThread(nullptr)
 {
     // 初始化所有 UI 控件
     setupUi();
@@ -22,6 +27,17 @@ GUI::GUI(QWidget* parent)
     // 初始化定时器
     m_livePreviewTimer = new QTimer(this);
     m_playbackTimer = new QTimer(this);
+
+    // [新增] 启动时加载 Homography 矩阵 (必须存在)
+    if (!loadHomography("./homography.xml")) {
+        QMessageBox::warning(this, "Initialization Warning",
+            "Failed to load 'homography.xml'. Processing functionality will be disabled.\n"
+            "Please run 'generate_homography.py' first.");
+        processButton->setEnabled(false);
+    }
+    else {
+        qInfo() << "Homography matrix loaded successfully.";
+    }
 
     // --- 连接所有信号和槽 ---
 
@@ -37,7 +53,7 @@ GUI::GUI(QWidget* parent)
     connect(m_livePreviewTimer, &QTimer::timeout, this, &GUI::updateLivePreview);
     connect(m_playbackTimer, &QTimer::timeout, this, &GUI::updatePlayback);
 
-    // 4. Python 进程
+    // 4. Python 进程 (推理阶段)
     connect(m_pythonProcess, &QProcess::readyReadStandardOutput, this, &GUI::onPythonOutput);
     connect(m_pythonProcess, &QProcess::errorOccurred, this, &GUI::onPythonError);
     connect(m_pythonProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
@@ -53,47 +69,69 @@ GUI::~GUI()
     if (m_currentState == AppState::Recording) {
         stopRecording();
     }
+
+    // 停止 Python
     if (m_pythonProcess->state() == QProcess::Running) {
-        m_pythonProcess->kill(); // 强制终止 Python
+        m_pythonProcess->kill();
+        m_pythonProcess->waitForFinished();
     }
+
+    // 停止 C++ 线程
+    if (m_processThread) {
+        m_processThread->quit();
+        m_processThread->wait();
+    }
+
     m_livePreviewTimer->stop();
     m_playbackTimer->stop();
 }
 
-// --- 2. UI 辅助函数 (setupUi 和 setUiState) ---
+// =========================================================
+// 2. UI 辅助函数 (setupUi 和 setUiState)
+// =========================================================
 
-// 辅助函数：创建所有 UI 控件
+// 加载单应性矩阵
+bool GUI::loadHomography(const QString& path) {
+    if (!QFile::exists(path)) return false;
+    try {
+        cv::FileStorage fs(path.toStdString(), cv::FileStorage::READ);
+        if (!fs.isOpened()) return false;
+        fs["H"] >> m_homographyMatrix;
+        return !m_homographyMatrix.empty();
+    }
+    catch (...) { return false; }
+}
+
+// 创建所有 UI 控件 (保持原有布局)
 void GUI::setupUi()
 {
-    setWindowTitle("双相机采集与处理系统");
-    resize(QSize(1600, 700)); // (W, H)
+    setWindowTitle("Dual Camera High-Performance System");
+    resize(QSize(1600, 700));
 
-    // 布局
     mainLayout = new QVBoxLayout();
     viewLayout = new QHBoxLayout();
     datasetLayout = new QHBoxLayout();
     buttonLayout = new QHBoxLayout();
 
-    // 视图 (移除了 DVS)
-    view_RGB = new QLabel("原始 (RGB)");
-    view_Deblurred = new QLabel("去模糊 (结果)");
+    view_RGB = new QLabel("Live Preview / Input");
+    view_Deblurred = new QLabel("Result / Status");
     view_RGB->setFrameStyle(QFrame::Box);
     view_Deblurred->setFrameStyle(QFrame::Box);
     view_RGB->setMinimumSize(800, 600);
     view_Deblurred->setMinimumSize(800, 600);
     view_RGB->setScaledContents(true);
     view_Deblurred->setScaledContents(true);
+    view_RGB->setAlignment(Qt::AlignCenter);
+    view_Deblurred->setAlignment(Qt::AlignCenter);
 
     viewLayout->addWidget(view_RGB);
     viewLayout->addWidget(view_Deblurred);
 
-    // 数据集输入
     datasetInput = new QLineEdit();
-    datasetInput->setPlaceholderText("在此输入数据集名称 (例如: 'Test01')");
-    datasetLayout->addWidget(new QLabel("数据集名称:"));
+    datasetInput->setPlaceholderText("Enter dataset name (e.g., 'Test01')");
+    datasetLayout->addWidget(new QLabel("Dataset Name:"));
     datasetLayout->addWidget(datasetInput);
 
-    // 控制按钮
     recordButton = new QPushButton("Start Recording");
     processButton = new QPushButton("Process Last Segment");
     playbackButton = new QPushButton("Play");
@@ -105,7 +143,6 @@ void GUI::setupUi()
     buttonLayout->addWidget(playbackButton);
     buttonLayout->addWidget(playbackSlider);
 
-    // 组合
     auto mainWidget = new QWidget();
     mainLayout->addLayout(viewLayout);
     mainLayout->addLayout(datasetLayout);
@@ -114,7 +151,7 @@ void GUI::setupUi()
     setCentralWidget(mainWidget);
 }
 
-// 核心：状态机，用于控制 UI 启用/禁用
+// 状态机控制
 void GUI::setUiState(AppState newState)
 {
     m_currentState = newState;
@@ -123,8 +160,7 @@ void GUI::setUiState(AppState newState)
     case AppState::Idle:
         recordButton->setText("Start Recording");
         recordButton->setEnabled(true);
-        // 只有在已录制一段后才允许处理
-        processButton->setEnabled(!m_currentSegmentPath.isEmpty());
+        processButton->setEnabled(!m_currentSegmentPath.isEmpty() && !m_homographyMatrix.empty());
         playbackButton->setVisible(false);
         playbackSlider->setVisible(false);
         break;
@@ -132,22 +168,28 @@ void GUI::setUiState(AppState newState)
     case AppState::Recording:
         recordButton->setText("Stop Recording");
         recordButton->setEnabled(true);
-        processButton->setEnabled(false); // 录制时不允许处理
+        processButton->setEnabled(false);
         playbackButton->setVisible(false);
         playbackSlider->setVisible(false);
         break;
 
-    case AppState::Processing:
-        recordButton->setEnabled(false); // 处理时锁定所有操作
+    case AppState::Processing: // C++ Running
+        recordButton->setEnabled(false);
         processButton->setEnabled(false);
         playbackButton->setVisible(false);
         playbackSlider->setVisible(false);
-        view_Deblurred->setText("Processing... (Python is running)");
+        view_Deblurred->setText("System: C++ Preprocessing (Chunked Parallel)...");
+        break;
+
+    case AppState::Inference: // Python Running
+        recordButton->setEnabled(false);
+        processButton->setEnabled(false);
+        view_Deblurred->setText("System: AI Inference Running...");
         break;
 
     case AppState::Playback_Paused:
     case AppState::Playback_Playing:
-        recordButton->setEnabled(false); // 回放时不允许录制/处理
+        recordButton->setEnabled(false);
         processButton->setEnabled(false);
         playbackButton->setVisible(true);
         playbackSlider->setVisible(true);
@@ -157,60 +199,93 @@ void GUI::setUiState(AppState newState)
     }
 }
 
-// --- 3. 按钮槽函数 ---
+// =========================================================
+// 3. 按钮槽函数
+// =========================================================
 
 void GUI::onRecordButtonClicked()
 {
     if (m_currentState == AppState::Recording) {
         // --- 停止录制 ---
         stopRecording();
-        view_RGB->setText("Preview Stopped.");
-        view_Deblurred->setText(QString("Segment %1 Recorded.\nReady to process.").arg(m_segmentCounter));
+        view_RGB->setText("Recording Stopped.");
+        view_Deblurred->setText(QString("Segment %1 Saved.\nReady to process.").arg(m_segmentCounter));
         setUiState(AppState::Idle);
     }
     else if (m_currentState == AppState::Idle) {
         // --- 开始录制 ---
         if (datasetInput->text().isEmpty()) {
-            QMessageBox::warning(this, "Error", "请输入数据集名称。");
+            QMessageBox::warning(this, "Error", "Please enter a dataset name.");
             return;
         }
         startRecording();
-        view_Deblurred->setText(QString("Recording Segment %1...").arg(m_segmentCounter));
+        view_Deblurred->setText(QString("Recording Segment %1...").arg(m_segmentCounter + 1)); // 显示即将录制的段号
         setUiState(AppState::Recording);
     }
 }
 
+// [修改] 点击处理按钮：启动 C++ 线程
 void GUI::onProcessButtonClicked()
 {
-    if (m_currentState == AppState::Idle && !m_currentSegmentPath.isEmpty()) {
-        launchProcessing();
+    if (m_currentState != AppState::Idle || m_currentSegmentPath.isEmpty()) return;
+    if (m_homographyMatrix.empty()) {
+        QMessageBox::critical(this, "Error", "Homography matrix not loaded.");
+        return;
     }
+
+    setUiState(AppState::Processing);
+    view_Deblurred->setText("Initializing DataProcessor...");
+
+    // 1. 创建 Thread 和 Worker
+    m_processThread = new QThread;
+    // 创建 DataProcessor (传入路径和矩阵)
+    DataProcessor* processor = new DataProcessor(m_currentSegmentPath.toStdString(), m_homographyMatrix);
+
+    processor->moveToThread(m_processThread);
+
+    // 2. 连接信号
+    // 线程启动 -> processor::process
+    connect(m_processThread, &QThread::started, processor, &DataProcessor::process);
+
+    // 进度更新 (跨线程 UI 更新)
+    connect(processor, &DataProcessor::progress, this, &GUI::onProcessingProgress);
+
+    // 完成处理
+    connect(processor, &DataProcessor::finished, this, &GUI::onProcessingFinished);
+
+    // 资源清理
+    connect(processor, &DataProcessor::finished, m_processThread, &QThread::quit);
+    connect(processor, &DataProcessor::finished, processor, &QObject::deleteLater);
+    connect(m_processThread, &QThread::finished, m_processThread, &QObject::deleteLater);
+    connect(m_processThread, &QThread::finished, [this]() { m_processThread = nullptr; });
+
+    // 3. 启动线程
+    m_processThread->start();
 }
 
 void GUI::onPlaybackButtonClicked()
 {
     if (m_currentState == AppState::Playback_Playing) {
-        // --- 暂停 ---
         m_playbackTimer->stop();
         setUiState(AppState::Playback_Paused);
     }
     else if (m_currentState == AppState::Playback_Paused) {
-        // --- 播放 ---
-        m_playbackTimer->start(33); // 约 30 FPS
+        m_playbackTimer->start(33); // 30 FPS
         setUiState(AppState::Playback_Playing);
     }
 }
 
 void GUI::onSliderMoved(int frame_index)
 {
-    // 只有在暂停时才能拖动滑块
     if (m_currentState == AppState::Playback_Paused) {
         m_playbackIndex = frame_index;
         showFrame(m_playbackIndex);
     }
 }
 
-// --- 4. 录制逻辑 (C++) ---
+// =========================================================
+// 4. 录制逻辑 (C++) - 保持不变
+// =========================================================
 
 void GUI::startRecording()
 {
@@ -218,46 +293,38 @@ void GUI::startRecording()
     m_segmentCounter++;
     std::string segment_name = "segment_" + std::to_string(m_segmentCounter);
 
-    // (注意 DVS.start 和 RGB.startCapture 接受不同格式的路径)
     std::string segment_path_str = "./" + dataset_name + "/" + segment_name;
     m_currentSegmentPath = QDir::toNativeSeparators(QString::fromStdString(segment_path_str));
 
     QDir().mkpath(m_currentSegmentPath);
 
-    // 启动硬件录制
-    // DVS.start() 需要 "dataset_name/segment_N" 格式
-    std::string dvs_name_arg = dataset_name + "/" + segment_name;
-    dvs.start(dvs_name_arg);
+    // DVS 启动 (需要 "dataset/segment" 格式)
+    dvs.start(dataset_name + "/" + segment_name);
 
-    // RGB.startCapture() 需要文件夹路径
+    // RGB 启动 (需要全路径)
     rgb.startCapture(m_currentSegmentPath.toStdString());
 
-    // 启动触发器
-    uno.start(); //
+    // 触发器启动
+    uno.start();
 
-    // 启动实时预览定时器
-    m_livePreviewTimer->start(33); // 约 30 FPS
+    m_livePreviewTimer->start(33);
 }
 
 void GUI::stopRecording()
 {
     m_livePreviewTimer->stop();
-    uno.stop(); //
-
-    // 停止并等待录制线程完成 (HDF5 和 RAW 文件被安全关闭)
-    rgb.stopCapture();
-    dvs.stopRecord();
+    uno.stop();
+    rgb.stopCapture(); // 这里会关闭 HDF5
+    dvs.stopRecord();  // 这里会停止 RAW 录制
 }
 
-// QTimer 槽：用于实时预览
 void GUI::updateLivePreview()
 {
     cv::Mat temp_bgr_frame;
-    rgb.getLatestFrame(&temp_bgr_frame); //
+    rgb.getLatestFrame(&temp_bgr_frame);
 
     if (temp_bgr_frame.empty()) return;
 
-    // 转换为 Qt 格式 (BGR -> RGB)
     cv::Mat temp_rgb_frame;
     cv::cvtColor(temp_bgr_frame, temp_rgb_frame, cv::COLOR_BGR2RGB);
 
@@ -267,186 +334,219 @@ void GUI::updateLivePreview()
         (int)temp_rgb_frame.step,
         QImage::Format_RGB888);
 
-    view_RGB->setPixmap(QPixmap::fromImage(qimg.copy())); // .copy() 确保数据安全
+    view_RGB->setPixmap(QPixmap::fromImage(qimg.copy()));
 }
 
-// --- 5. 处理逻辑 (Python) ---
+// =========================================================
+// 5. 处理逻辑 (C++ DataProcessor Callback)
+// =========================================================
 
-void GUI::launchProcessing()
+// [新增] 进度槽
+void GUI::onProcessingProgress(const QString& message)
 {
-    setUiState(AppState::Processing);
+    view_Deblurred->setText(message);
+}
 
-    // !!! 关键：您必须在此处设置您的 Python 环境 !!!
-    // 假设 "python" 在您的系统 PATH 中，并且安装了所有库
-    // (例如，您激活了 Anaconda 环境)
-    QString python_executable = "python";
+// [新增] 完成槽
+void GUI::onProcessingFinished(bool success)
+{
+    if (!success) {
+        QMessageBox::critical(this, "Processing Failed", "C++ Data Preprocessing failed.\nCheck console for error details.");
+        setUiState(AppState::Idle);
+        view_Deblurred->setText("Preprocessing FAILED.");
+        return;
+    }
 
-    // !!! 关键：您必须设置 Python 脚本的路径 !!!
-    QString script_path = "./master_process.py"; // <--- !! 修改此路径 !!
+    // C++ 成功 -> 启动 Python 推理
+    launchPythonInference();
+}
+
+// =========================================================
+// 6. 推理逻辑 (Python)
+// =========================================================
+
+void GUI::launchPythonInference()
+{
+    setUiState(AppState::Inference);
+
+    QString python_executable = "python"; // 或您的 conda python 路径
+    QString script_path = "./test.py";
+    QString config_path = "./real.yml";
 
     if (!QFile::exists(script_path)) {
-        QMessageBox::critical(this, "Error", "Python 脚本未找到: " + script_path);
+        QMessageBox::critical(this, "Error", "Python script 'test.py' not found.");
         setUiState(AppState::Idle);
         return;
     }
 
     QStringList args;
-    args << script_path << "--path" << m_currentSegmentPath;
+    // 传递参数给 test.py
+    // 假设 test.py 读取 --dataroot 下的 processed_data.h5
+    args << script_path << "-opt" << config_path << "--dataroot" << m_currentSegmentPath;
 
-    qDebug() << "Starting Python process: " << python_executable << args;
-
+    qDebug() << "Launching Python:" << python_executable << args;
     m_pythonProcess->start(python_executable, args);
 }
 
-void GUI::onPythonOutput()
-{
-    // 打印 Python 的调试输出
-    qDebug() << "Python:" << m_pythonProcess->readAllStandardOutput();
+void GUI::onPythonOutput() {
+    qDebug() << "[Python]" << m_pythonProcess->readAllStandardOutput();
 }
 
-void GUI::onPythonError()
-{
-    qWarning() << "Python Error:" << m_pythonProcess->readAllStandardError();
+void GUI::onPythonError() {
+    qWarning() << "[Python Error]" << m_pythonProcess->readAllStandardError();
 }
 
 void GUI::onPythonFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
-    qDebug() << "Python process finished. Exit code:" << exitCode;
-
     if (exitCode == 0 && exitStatus == QProcess::NormalExit) {
-        // --- 成功 ---
-        view_Deblurred->setText("Processing Complete. Loading data...");
-        // 启动回放加载
+        view_Deblurred->setText("Inference Complete. Loading Results...");
         setupPlayback(m_currentSegmentPath);
     }
     else {
-        // --- 失败 ---
-        QMessageBox::critical(this, "Processing Failed", "Python 脚本运行失败。请检查控制台输出。");
-        view_Deblurred->setText("Processing FAILED.");
+        QMessageBox::critical(this, "Inference Failed", "Python script failed.");
         setUiState(AppState::Idle);
+        view_Deblurred->setText("Inference FAILED.");
     }
 }
 
-// --- 6. 回放逻辑 (C++) ---
+// =========================================================
+// 7. 回放逻辑 (HDF5 Input + PNG Output)
+// =========================================================
 
 void GUI::setupPlayback(const QString& segmentPath)
 {
-    // 1. 清空旧数据
     m_blurryFrames.clear();
     m_deblurredFrames.clear();
 
-    // 2. 定义 Python 脚本的输出路径 (基于)
-    QDir blurry_dir(segmentPath + "/rgb_crop");
-    QDir deblurred_dir(segmentPath + "/deblurred");
+    // --- 1. 读取 Input Frames (从 processed_data.h5) ---
+    try {
+        std::string h5_path = segmentPath.toStdString() + "/processed_data.h5";
 
-    // 过滤以 .png 结尾的文件并排序
-    QStringList filters = { "*.png" };
-    QStringList blurry_files = blurry_dir.entryList(filters, QDir::Files, QDir::Name);
-    QStringList deblurred_files = deblurred_dir.entryList(filters, QDir::Files, QDir::Name);
+        // 使用 HDF5 C++ API 打开
+        H5::H5File f(h5_path, H5F_ACC_RDONLY);
+        H5::DataSet ds = f.openDataSet("rgb_aligned");
 
-    if (blurry_files.isEmpty() || deblurred_files.isEmpty()) {
-        QMessageBox::critical(this, "Playback Error", "未找到 Python 处理后的图像文件 (rgb_crop 或 deblurred 文件夹为空)。");
-        setUiState(AppState::Idle);
-        return;
-    }
+        // 获取维度 [N, H, W, C]
+        hsize_t dims[4];
+        ds.getSpace().getSimpleExtentDims(dims, NULL);
+        int frame_count = (int)dims[0];
+        int h = (int)dims[1]; // 720
+        int w = (int)dims[2]; // 1000
+        int c = (int)dims[3]; // 3
 
-    if (blurry_files.size() != deblurred_files.size()) {
-        qWarning() << "Warning: Blurry and deblurred frame counts do not match.";
-    }
+        // 一次性读取到内存 Buffer (比逐帧读快得多)
+        // 100帧 ~ 200MB, 内存完全够用
+        size_t total_bytes = (size_t)frame_count * h * w * c;
+        std::vector<unsigned char> buffer(total_bytes);
+        ds.read(buffer.data(), H5::PredType::NATIVE_UINT8);
 
-    // 3. 一次性加载所有图像到内存
-    int frame_count = qMin(blurry_files.size(), deblurred_files.size());
-    for (int i = 0; i < frame_count; ++i) {
-        cv::Mat blurry_img = cv::imread(blurry_dir.filePath(blurry_files[i]).toStdString());
-        cv::Mat deblurred_img = cv::imread(deblurred_dir.filePath(deblurred_files[i]).toStdString());
-
-        if (blurry_img.empty() || deblurred_img.empty()) {
-            qWarning() << "Failed to load frame" << i;
-            continue;
+        // 转换为 OpenCV Mat
+        for (int i = 0; i < frame_count; ++i) {
+            unsigned char* ptr = buffer.data() + (size_t)i * h * w * c;
+            cv::Mat img(h, w, CV_8UC3, ptr);
+            m_blurryFrames.push_back(img.clone()); // 深拷贝
         }
 
-        m_blurryFrames.push_back(blurry_img);
-        m_deblurredFrames.push_back(deblurred_img);
-    }
+        qDebug() << "Loaded" << frame_count << "input frames from HDF5.";
 
-    if (m_blurryFrames.empty()) {
-        QMessageBox::critical(this, "Playback Error", "加载所有图像均失败。");
+    }
+    catch (H5::Exception& e) {
+        QMessageBox::warning(this, "Playback Error",
+            QString("Failed to load input HDF5: %1").arg(e.getCDetailMsg()));
+        setUiState(AppState::Idle);
+        return;
+    }
+    catch (...) {
+        QMessageBox::warning(this, "Playback Error", "Unknown error loading HDF5.");
         setUiState(AppState::Idle);
         return;
     }
 
-    // 4. 设置回放状态
-    m_playbackIndex = 0;
-    playbackSlider->setRange(0, m_blurryFrames.size() - 1);
+    // --- 2. 读取 Output Frames (从 PNG 文件夹) ---
+    QDir deblurred_dir(segmentPath + "/deblurred/final_output");
+    if (!deblurred_dir.exists()) {
+        deblurred_dir.setPath(segmentPath + "/deblurred"); // 尝试上一级
+    }
 
-    // 5. 显示第一帧并进入暂停状态
-    showFrame(0);
+    QStringList filters = { "*.png" };
+    QStringList files = deblurred_dir.entryList(filters, QDir::Files, QDir::Name); // 按名称排序
+
+    for (const auto& filename : files) {
+        std::string filepath = deblurred_dir.filePath(filename).toStdString();
+        cv::Mat img = cv::imread(filepath);
+        if (!img.empty()) {
+            m_deblurredFrames.push_back(img);
+        }
+    }
+
+    if (m_deblurredFrames.empty()) {
+        // 仅警告，不阻止播放原图
+        qWarning() << "No deblurred result images found.";
+        view_Deblurred->setText("No Result Images Found.");
+    }
+
+    // --- 3. 启动回放 ---
+    m_playbackIndex = 0;
+    int max_frames = m_blurryFrames.size();
+    // 如果有结果图，取较小值防止越界；如果没结果图，就只播原图
+    if (!m_deblurredFrames.empty()) {
+        max_frames = (std::min)(max_frames, (int)m_deblurredFrames.size());
+    }
+
+    if (max_frames == 0) {
+        setUiState(AppState::Idle);
+        return;
+    }
+
+    playbackSlider->setRange(0, max_frames - 1);
     setUiState(AppState::Playback_Paused);
-    view_Deblurred->setText(""); // 清空状态文本
+    showFrame(0);
 }
 
-// QTimer 槽：用于回放循环
 void GUI::updatePlayback()
 {
     if (m_blurryFrames.empty()) return;
 
     m_playbackIndex++;
-    if (m_playbackIndex >= m_blurryFrames.size()) {
-        m_playbackIndex = 0; // 循环播放
+    // 循环播放
+    int max_idx = playbackSlider->maximum();
+    if (m_playbackIndex > max_idx) {
+        m_playbackIndex = 0;
     }
-
     showFrame(m_playbackIndex);
 }
 
-// 辅助函数：在两个窗口中同步显示第 N 帧
 void GUI::showFrame(int index)
 {
     if (index < 0 || index >= m_blurryFrames.size()) return;
 
-    // 1. 获取帧 (它们是 BGR)
+    // 显示 Input (Blurry)
     const cv::Mat& blurry = m_blurryFrames[index];
-    const cv::Mat& deblurred = m_deblurredFrames[index];
-
-    // 2. 转换 blurry (BGR -> RGB)
     cv::Mat blurry_rgb;
     cv::cvtColor(blurry, blurry_rgb, cv::COLOR_BGR2RGB);
-    QImage qimg_blurry(blurry_rgb.data,
-        blurry_rgb.cols,
-        blurry_rgb.rows,
-        (int)blurry_rgb.step,
-        QImage::Format_RGB888);
+    QImage qimg_blurry(blurry_rgb.data, blurry_rgb.cols, blurry_rgb.rows, (int)blurry_rgb.step, QImage::Format_RGB888);
     view_RGB->setPixmap(QPixmap::fromImage(qimg_blurry.copy()));
 
-    // 3. 转换 deblurred (BGR -> RGB)
-    cv::Mat deblurred_rgb;
-    cv::cvtColor(deblurred, deblurred_rgb, cv::COLOR_BGR2RGB);
-    QImage qimg_deblurred(deblurred_rgb.data,
-        deblurred_rgb.cols,
-        deblurred_rgb.rows,
-        (int)deblurred_rgb.step,
-        QImage::Format_RGB888);
-    view_Deblurred->setPixmap(QPixmap::fromImage(qimg_deblurred.copy()));
+    // 显示 Result (Deblurred) - 只有存在时才显示
+    if (index < m_deblurredFrames.size()) {
+        const cv::Mat& deblurred = m_deblurredFrames[index];
+        cv::Mat deblurred_rgb;
+        cv::cvtColor(deblurred, deblurred_rgb, cv::COLOR_BGR2RGB);
+        QImage qimg_deblurred(deblurred_rgb.data, deblurred_rgb.cols, deblurred_rgb.rows, (int)deblurred_rgb.step, QImage::Format_RGB888);
+        view_Deblurred->setPixmap(QPixmap::fromImage(qimg_deblurred.copy()));
+    }
+    else if (m_deblurredFrames.empty()) {
+        // 保持之前的 "No Result" 文本，不清除
+    }
 
-    // 4. 更新滑块 (避免触发 sliderMoved 信号)
+    // 更新滑块
     playbackSlider->blockSignals(true);
     playbackSlider->setValue(index);
     playbackSlider->blockSignals(false);
 }
 
-// --- 7. 安全关闭 ---
-
 void GUI::closeEvent(QCloseEvent* event)
 {
-    // 停止所有正在运行的活动
-    if (m_currentState == AppState::Recording) {
-        stopRecording();
-    }
-    if (m_currentState == AppState::Processing) {
-        m_pythonProcess->kill(); // 强制终止
-        m_pythonProcess->waitForFinished();
-    }
-    m_livePreviewTimer->stop();
-    m_playbackTimer->stop();
-
-    event->accept(); // 接受关闭
+    // 析构函数会处理清理
+    event->accept();
 }

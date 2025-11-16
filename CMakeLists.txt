@@ -26,18 +26,20 @@ list(APPEND CMAKE_PREFIX_PATH "D:/Prophesee/share/cmake/hdf5_ecf"
 
 set(HDF5_DIR "D:/anaconda/Library/cmake")
 
-find_package(MetavisionSDK COMPONENTS core driver ui REQUIRED)
-find_package(OpenCV REQUIRED)
-find_package(Qt5 COMPONENTS Widgets Core Gui REQUIRED)
-set(CMAKE_AUTOMOC ON)
+
 message(STATUS "Qt5 DIR: ${Qt5_DIR}")
 find_package(OpenMP REQUIRED)
 find_package(HDF5 COMPONENTS C CXX REQUIRED)
+find_package(MetavisionSDK COMPONENTS core driver ui REQUIRED)
+find_package(OpenCV REQUIRED)
+find_package(Qt5 COMPONENTS Widgets Core Gui REQUIRED)
+find_package(OpenMP REQUIRED)
 
 aux_source_directory(./src BASE_SOURCE)
 
 add_executable(dualcamera ${BASE_SOURCE} main.cpp 
     include/Gui.h 
+    include/DataProcessor.h
 )
 
 target_include_directories(dualcamera PUBLIC 
@@ -58,4 +60,5 @@ target_link_libraries(dualcamera
     ${MV_LIB_DIR}/MvCameraControl.lib
     ${HDF5_CXX_LIBRARIES}
     ${HDF5_C_LIBRARIES}
+    OpenMP::OpenMP_CXX
 )

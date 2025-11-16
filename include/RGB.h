@@ -13,8 +13,8 @@
 #include <mutex>
 #include <condition_variable>
 #include <thread>
-#include <H5Cpp.h> // +++ ADDED: 引入 HDF5 C++ API
-#include <memory>  // +++ ADDED: 引入 smart pointers
+#include <H5Cpp.h> 
+#include <memory>  
 
 class RGB {
 public:
@@ -26,7 +26,7 @@ public:
     void startCapture(const std::string& save_path);
     void stopCapture();
 
-    // Image access
+    // Image access (for GUI Live Preview)
     void getLatestFrame(cv::Mat* output_frame);
 
     // Status flag
@@ -50,13 +50,13 @@ private:
         }
     };
 
-    // +++ ADDED: 新结构体，用于存放已处理好、待写入HDF5的帧
+    // 已处理好、待写入HDF5的帧
     struct ProcessedFrame {
-        cv::Mat frame;       // BGR 格式的 cv::Mat
+        cv::Mat frame;       // BGR 格式
         unsigned int frame_number;
     };
 
-    // (Semaphore class is unchanged)
+    // Semaphore class (信号量，用于线程同步)
     class Semaphore {
     public:
         explicit Semaphore(long initial_count = 0) : count(initial_count) {}
@@ -101,6 +101,7 @@ private:
     std::thread task_distribution_thread;
 
     void distributeTasksThread();
+
     // ==================== Camera State ====================
     bool task_stop = false;
     bool is_initialized = false;
@@ -114,7 +115,7 @@ private:
     // ==================== Camera Hardware ====================
     void* camera_handle = nullptr;
     unsigned char* rgb_buffer = nullptr;
-    unsigned int image_node_count = 200; // Default buffer count
+    unsigned int image_node_count = 200;
 
     // ==================== Camera SDK Structures ====================
     MV_CC_DEVICE_INFO_LIST device_list;
@@ -125,8 +126,7 @@ private:
     MV_CC_SAVE_IMAGE_PARAM image_save_params;
 
     // ==================== Threading ====================
-    // std::thread save_thread; // <<< CHANGED: 我们将用 hdf5_writer_thread 替换
-    std::thread hdf5_writer_thread; // +++ ADDED: 专用的HDF5写入线程
+    std::thread hdf5_writer_thread; // HDF5 专用写入线程
     std::mutex task_mutex;
     std::mutex display_mutex;
     Semaphore image_semaphore;
@@ -135,15 +135,19 @@ private:
     std::condition_variable task_cv;
 
     // ==================== Data Structures ====================
-    DataQueue<ImageNode*> image_queue; // L1 (Callback) -> L2 (Distributor) 的队列
-    DataQueue<ProcessedFrame*> hdf5_write_queue; // +++ ADDED: L3 (Pool) -> L4 (HDF5 Writer) 的队列
-    LimitedStack<cv::Mat> display_stack{ 3 };
+    DataQueue<ImageNode*> image_queue; // L1: Callback -> Distributor
+    DataQueue<ProcessedFrame*> hdf5_write_queue; // L2: Pool -> HDF5 Writer
+    LimitedStack<cv::Mat> display_stack{ 3 }; // L3: For GUI Display
 
     // ==================== HDF5 Members ====================
-    std::unique_ptr<H5::H5File> h5_file; // +++ ADDED: HDF5 文件句柄
-    H5::DataSet h5_rgb_dataset;         // +++ ADDED: HDF5 图像数据集
-    hsize_t h5_rgb_dims[4];             // +++ ADDED: 图像数据集维度
-    std::mutex h5_mutex;                // +++ ADDED: 保护HDF5文件操作（主要在开关时）
+    std::unique_ptr<H5::H5File> h5_file;
+    H5::DataSet h5_rgb_dataset;         // 图像数据集
+    hsize_t h5_rgb_dims[4];             // 图像维度
+
+    // [新增] 帧号数据集
+    H5::DataSet h5_frame_num_dataset;
+
+    std::mutex h5_mutex;
 
     // ==================== Private Methods ====================
     // Initialization
@@ -160,17 +164,10 @@ private:
 
     // Thread functions
     static void imageCallback(unsigned char* image_data, MV_FRAME_OUT_INFO_EX* frame_info, void* user_data);
-
-    // <<< CHANGED: 这是线程池的新任务
-    void processAndQueueFrame(ImageNode* image_node); // +++ ADDED
-
-    // <<< REPLACED: 旧的保存函数 (将在 .cpp 中被 processAndQueueFrame 替换)
-    // void processAndSaveImage(ImageNode* image_node); 
-
-    // +++ ADDED: HDF5 写入线程的主循环
+    void processAndQueueFrame(ImageNode* image_node);
     void hdf5WriteLoop();
 
-    // +++ ADDED: HDF5 辅助函数
+    // HDF5 Helper Functions
     bool initializeHDF5(const std::string& base_path);
     void extendAndWriteHDF5(ProcessedFrame* frame);
     void closeHDF5();
@@ -178,7 +175,6 @@ private:
     // Disallow copying
     RGB(const RGB&) = delete;
     RGB& operator=(const RGB&) = delete;
-
 };
 
 #endif // RGB_H
