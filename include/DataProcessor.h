@@ -48,13 +48,14 @@ signals:
 
 private:
     // --- 步骤函数 ---
-    bool loadFromRaw();        // 步骤1: 亿级事件加载与内存预估
-    bool createOutputH5();     // 步骤2: 初始化 HDF5
-    bool processFramesChunked(); // 步骤3: 分块并行处理 (核心优化)
+    bool loadFromRaw();
+    bool createOutputH5();
+    bool processFramesChunked();
 
-    // --- 核心算法 ---
-    // 使用原始指针进行体素化，避免 vector 构造开销
-    void runVoxelization(uint64_t t_start, uint64_t t_end, float* out_voxel_ptr);
+    // --- 核心算法 (优化版接口) ---
+    // 移除 t_start/t_end 查找，改为直接传入 vector 下标范围
+    // 同时也传入触发器时间用于归一化计算
+    void runVoxelization(size_t start_idx, size_t end_idx, float* out_voxel_ptr, uint64_t t_trigger_start, uint64_t t_trigger_end);
 
     // --- 成员变量 ---
     std::string m_segmentPath;
@@ -70,22 +71,30 @@ private:
     std::vector<Event> m_events;
     std::vector<Trigger> m_triggers;
 
+    // [新增] CPU优化关键：预计算每帧对应的事件索引范围 [start, end)
+    std::vector<std::pair<size_t, size_t>> m_frameEventIndices;
+
     int m_numFrames;
 
-    // --- 参数配置 ---
-    const int INPUT_RGB_H = 720;
-    const int INPUT_RGB_W = 1280;
+    // --- [修改] 参数配置 (适配 500W 相机) ---
+    // 假设 500W 相机分辨率约为 2592 x 1944
+    const int INPUT_RGB_W = 2592;
+    const int INPUT_RGB_H = 1944;
 
+    // 输出对齐尺寸 (保持 720p 或根据需要调整)
     const int ALIGNED_RGB_H = 720;
     const int ALIGNED_RGB_W = 1000;
 
     const int VOXEL_BINS = 5;
     const int VOXEL_H = 720;
     const int VOXEL_W = 1000;
-    const int VOXEL_CROP_X_MIN = 280;
+    const int VOXEL_CROP_X_MIN = 280; // 注意：如果是 500W 分辨率，这个裁剪值可能需要调整！
 
-    // 分块大小 (根据内存调整，100帧约需 1.5GB 临时内存，非常安全)
-    const int CHUNK_SIZE = 100;
+    // [修改] 分块大小
+    // 500W RGB (2592*1944*3) ≈ 15MB/帧
+    // 50帧 ≈ 750MB Raw RGB + 750MB Processed + Voxels
+    // 内存峰值控制在 2GB 以内，非常安全
+    const int CHUNK_SIZE = 50;
 };
 
 #endif // DATAPROCESSOR_H

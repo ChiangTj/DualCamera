@@ -364,27 +364,47 @@ void GUI::onProcessingFinished(bool success)
 // =========================================================
 // 6. 推理逻辑 (Python)
 // =========================================================
-
 void GUI::launchPythonInference()
 {
     setUiState(AppState::Inference);
 
-    QString python_executable = "python"; // 或您的 conda python 路径
-    QString script_path = "./test.py";
+    // 1. 设置 Python 环境和脚本路径
+    // 建议：如果在发布版本中，尽量不要硬编码 python，而是读取环境变量或配置文件
+    QString python_executable = "python";
+
+    // 指向新创建的 wrapper 脚本
+    QString script_path = "./run_inference.py";
     QString config_path = "./real.yml";
 
+    // 检查脚本是否存在
     if (!QFile::exists(script_path)) {
-        QMessageBox::critical(this, "Error", "Python script 'test.py' not found.");
+        QMessageBox::critical(this, "Error", "Python script 'run_inference.py' not found.");
         setUiState(AppState::Idle);
         return;
     }
 
+    // 2. 构建参数列表
     QStringList args;
-    // 传递参数给 test.py
-    // 假设 test.py 读取 --dataroot 下的 processed_data.h5
-    args << script_path << "-opt" << config_path << "--dataroot" << m_currentSegmentPath;
 
-    qDebug() << "Launching Python:" << python_executable << args;
+    // 对应 run_inference.py 中的 parser.add_argument
+    args << script_path;
+    args << "-opt" << config_path;
+
+    // 关键：传递动态的数据路径
+    // 确保 m_currentSegmentPath 是标准路径格式 (例如把 \ 替换为 /，避免 Python 转义问题)
+    QString cleanPath = m_currentSegmentPath;
+    cleanPath.replace("\\", "/");
+
+    args << "--dataroot" << cleanPath;
+
+    // 调试输出
+    qDebug() << "Launching Python:" << python_executable << args.join(" ");
+
+    // 3. 启动进程
+    // 建议设置工作目录，确保 Python 能找到 basicsr 模块
+    m_pythonProcess->setWorkingDirectory(QCoreApplication::applicationDirPath());
+    // 或者显式指定为 script_path 所在的目录
+
     m_pythonProcess->start(python_executable, args);
 }
 
