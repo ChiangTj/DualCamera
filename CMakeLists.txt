@@ -37,7 +37,7 @@ find_package(OpenMP REQUIRED)
 
 aux_source_directory(./src BASE_SOURCE)
 
-add_executable(dualcamera ${BASE_SOURCE} main.cpp 
+add_executable(dualcamera ${BASE_SOURCE} test_main.cpp 
     include/Gui.h 
     include/DataProcessor.h
 )
