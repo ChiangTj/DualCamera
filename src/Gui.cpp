@@ -399,32 +399,48 @@ void GUI::launchPythonInference()
 {
     setUiState(AppState::Inference);
 
-    // 配置 Python 路径 (根据实际情况修改)
-    // 建议：使用绝对路径指向 Conda 环境的 python.exe
+    // 1. 确定 Python 解释器
     QString python_executable = "python";
-    // 示例: QString python_executable = "C:/Anaconda3/envs/pytorch/python.exe";
+    QDir appDir = QDir(QCoreApplication::applicationDirPath());
 
-    QString script_path = "./run_inference.py";
-    QString config_path = "./real.yml";
+    // 最稳健的方法是尝试查找
+    QString script_rel_path = "../model/test.py"; // 尝试相对路径
+    QString config_rel_path = "../model/real.yml";
+
+    // 将相对路径转换为绝对路径，防止工作目录混乱
+    QString script_path = QDir::cleanPath(appDir.filePath(script_rel_path));
+    QString config_path = QDir::cleanPath(appDir.filePath(config_rel_path));
+
+    // 如果还没找到，尝试更深层级的回退 (针对 VS out/build/x64-Release 这种深层结构)
+    if (!QFile::exists(script_path)) {
+        // 尝试回退 3 层: out/build/x64-Release -> ProjectRoot -> model
+        script_path = QDir::cleanPath(appDir.filePath("../../../model/test.py"));
+        config_path = QDir::cleanPath(appDir.filePath("../../../model/real.yml"));
+    }
 
     if (!QFile::exists(script_path)) {
-        QMessageBox::critical(this, "Error", "Inference script not found:\n" + script_path);
+        QMessageBox::critical(this, "Configuration Error",
+            "Python script not found in 'model' directory.\n"
+            "Looked at:\n" + script_path);
         setUiState(AppState::Idle);
         return;
     }
 
+    // 3. 构建参数
     QStringList args;
     args << script_path;
     args << "-opt" << config_path;
 
-    // 统一路径分隔符，防止 Windows 下反斜杠被 Python 解析为转义符
+    // 路径标准化
     QString cleanPath = m_currentSegmentPath;
     cleanPath.replace("\\", "/");
     args << "--dataroot" << cleanPath;
 
-    qDebug() << "Executing:" << python_executable << args.join(" ");
+    qInfo() << "Launching Python:" << python_executable << args.join(" ");
 
-    m_pythonProcess->setWorkingDirectory(QCoreApplication::applicationDirPath());
+    m_pythonProcess->setWorkingDirectory(QFileInfo(script_path).absolutePath());
+
+    // 5. 启动
     m_pythonProcess->start(python_executable, args);
 }
 
