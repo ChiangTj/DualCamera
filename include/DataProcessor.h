@@ -144,7 +144,7 @@ private:
     const int ALIGNED_RGB_H = 720;
     const int ALIGNED_RGB_W = 1000;
 
-    const int VOXEL_BINS = 5;
+    const int VOXEL_BINS = 6;
     const int VOXEL_H = 720;
     const int VOXEL_W = 1000;
 

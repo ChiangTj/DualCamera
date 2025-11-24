@@ -27,7 +27,7 @@ public:
 	DVS();
 	~DVS();
 	void stopRecord();
-	void start(const std::string& name);
+	void start(const std::string& folder_path, const std::string& file_prefix);
 	void stop();
 	//void decode();
 	cv::Mat getFrame();

@@ -4,8 +4,10 @@
 #include <QDir>
 #include <QMessageBox>
 #include <QDebug>
-#include <QThread> // 确保包含
+#include <QThread> 
 #include <H5Cpp.h> // 必须包含 HDF5 头文件以读取回放数据
+#include <QCoreApplication> // 用于获取 exe 路径
+#include <QFile> 
 
 // =========================================================
 // 1. 构造函数：初始化 UI 和状态
@@ -31,11 +33,22 @@ GUI::GUI(QWidget* parent)
     m_livePreviewTimer = new QTimer(this);
     m_playbackTimer = new QTimer(this);
 
-    // 启动时加载 Homography 矩阵 (必须存在)
-    // 如果是调试模式，允许不存在，但禁用处理按钮
-    if (!loadHomography("./homography.xml")) {
-        view_Deblurred->setText("Warning: Homography not found.\nProcessing disabled.");
+    // =========================================================
+    // [关键修改] 使用绝对路径加载 Homography 矩阵
+    // =========================================================
+    // 获取 exe 所在的文件夹路径 (例如 .../bin)
+    QString exeDir = QCoreApplication::applicationDirPath();
+    // 拼接绝对路径
+    QString xmlPath = QDir::cleanPath(exeDir + "/homography.xml");
+
+    qInfo() << "Attempting to load Homography from:" << xmlPath;
+
+    if (!loadHomography(xmlPath)) {
+        // 如果加载失败，在界面上提示，并禁用处理按钮
+        view_Deblurred->setText("Error: homography.xml not found at:\n" + xmlPath + "\nProcessing disabled.");
         processButton->setEnabled(false);
+        // 可选：弹窗警告
+        // QMessageBox::warning(this, "Init Error", "Failed to load homography.xml\nCheck path: " + xmlPath);
     }
     else {
         qInfo() << "Homography matrix loaded successfully.";
@@ -95,6 +108,7 @@ GUI::~GUI()
 // =========================================================
 
 bool GUI::loadHomography(const QString& path) {
+    // 简单的 OpenCV 读取逻辑
     if (!QFile::exists(path)) return false;
     try {
         cv::FileStorage fs(path.toStdString(), cv::FileStorage::READ);
@@ -174,7 +188,9 @@ void GUI::setUiState(AppState newState)
     case AppState::Idle:
         recordButton->setText("Start Recording");
         recordButton->setEnabled(true);
-        // 只有在有录制记录且加载了矩阵时才允许处理
+
+        // [修改] 启用条件：路径不为空 && 矩阵已加载
+        // 移除了文件是否在磁盘存在的检查，防止按钮莫名变灰
         processButton->setEnabled(!m_currentSegmentPath.isEmpty() && !m_homographyMatrix.empty());
 
         // 如果之前已经加载了回放数据，允许播放
@@ -211,8 +227,11 @@ void GUI::setUiState(AppState newState)
         recordButton->setText("Start Recording");
         recordButton->setStyleSheet(""); // 恢复默认样式
         recordButton->setEnabled(true);
-        processButton->setEnabled(true);
+        // 回放状态下通常允许重新处理
         datasetInput->setEnabled(true);
+
+        // [修改] 同样移除文件检查
+        processButton->setEnabled(!m_currentSegmentPath.isEmpty() && !m_homographyMatrix.empty());
 
         playbackButton->setVisible(true);
         playbackSlider->setVisible(true);
@@ -239,6 +258,12 @@ void GUI::onRecordButtonClicked()
         stopRecording();
         view_RGB->setText("Recording Stopped.");
         view_Deblurred->setText(QString("Segment Saved to:\n%1\n\nClick 'Process' to start.").arg(m_currentSegmentPath));
+
+        // 调试：如果停止录制后发现矩阵还是空的，弹窗警告
+        if (m_homographyMatrix.empty()) {
+            QMessageBox::warning(this, "Debug", "Matrix is EMPTY! That is why button is disabled.");
+        }
+
         setUiState(AppState::Idle);
     }
     else if (m_currentState == AppState::Idle || m_currentState == AppState::Playback_Paused) {
@@ -248,8 +273,9 @@ void GUI::onRecordButtonClicked()
             return;
         }
         startRecording();
+        // 录制开始，process 按钮在 setUiState(Recording) 中被禁用
         setUiState(AppState::Recording);
-        view_Deblurred->setText(QString("Recording Segment %1...").arg(m_segmentCounter));
+        view_Deblurred->setText(QString("Recording Dataset: %1...").arg(datasetInput->text()));
     }
 }
 
@@ -258,7 +284,9 @@ void GUI::onProcessButtonClicked()
     if (m_currentSegmentPath.isEmpty()) return;
 
     // 检查文件是否存在
-    QString rawPath = m_currentSegmentPath + QDir::separator() + QDir(m_currentSegmentPath).dirName() + ".raw";
+    // 注意：点击时的检查依然保留，防止程序崩溃
+    QString dirName = QDir(m_currentSegmentPath).dirName();
+    QString rawPath = m_currentSegmentPath + "/" + dirName + ".raw";
     QString h5Path = m_currentSegmentPath + "/rgb_data.h5";
 
     if (!QFile::exists(rawPath) || !QFile::exists(h5Path)) {
@@ -323,26 +351,65 @@ void GUI::onSliderMoved(int frame_index)
 }
 
 // =========================================================
-// 4. 录制逻辑
+// 4. 录制逻辑 (修改为 data/DatasetName/DatasetName.raw)
 // =========================================================
 
 void GUI::startRecording()
 {
+    // 1. 获取用户输入
     std::string dataset_name = datasetInput->text().toStdString();
-    m_segmentCounter++;
-    std::string segment_name = "segment_" + std::to_string(m_segmentCounter);
+    if (dataset_name.empty()) {
+        QMessageBox::warning(this, "Error", "Please enter a dataset name.");
+        return;
+    }
 
-    std::string segment_path_str = "./" + dataset_name + "/" + segment_name;
-    m_currentSegmentPath = QDir::toNativeSeparators(QString::fromStdString(segment_path_str));
+    // 获取 exe 所在目录 (例如 .../bin)
+    QDir dir(QCoreApplication::applicationDirPath());
 
-    QDir().mkpath(m_currentSegmentPath);
+    // 向上跳转一级 (回到 ProjectRoot)
+    dir.cdUp();
 
-    // 注意：DVS SDK 可能需要特定的路径格式
-    dvs.start(dataset_name + "/" + segment_name);
-    rgb.startCapture(m_currentSegmentPath.toStdString());
-    uno.start(); // 触发器
+    // 拼接目标路径: ProjectRoot/data/dataset_name/
+    QString relative_path = QString("data/%1").arg(QString::fromStdString(dataset_name));
+    QString absolute_path = dir.filePath(relative_path);
 
-    m_livePreviewTimer->start(33);
+    // 转换为本机分隔符 (Windows下是 \)
+    m_currentSegmentPath = QDir::toNativeSeparators(absolute_path);
+
+    // 创建目录 (mkpath 会自动创建不存在的父目录 data 和 dataset)
+    if (!QDir().mkpath(m_currentSegmentPath)) {
+        QMessageBox::critical(this, "Error", "Failed to create directory:\n" + m_currentSegmentPath);
+        return;
+    }
+
+    qInfo() << "Recording Path:" << m_currentSegmentPath;
+
+    // =========================================================================
+
+    // 2. 启动硬件
+    std::string path_std = m_currentSegmentPath.toStdString();
+
+    try {
+        // DVS: 传入文件夹绝对路径 + 文件名(dataset_name)
+        // 结果: .../data/DatasetName/DatasetName.raw
+        dvs.start(path_std, dataset_name);
+
+        // RGB: 传入文件夹绝对路径
+        // 结果: .../data/DatasetName/rgb_data.h5
+        rgb.startCapture(path_std);
+
+        uno.start(); // 触发信号发生器
+
+        m_livePreviewTimer->start(33);
+
+        // 状态更新为 Recording，按钮会在 setUiState 中被更新
+        setUiState(AppState::Recording);
+        view_Deblurred->setText(QString("Recording to:\n%1").arg(m_currentSegmentPath));
+    }
+    catch (std::exception& e) {
+        QMessageBox::critical(this, "Hardware Error", e.what());
+        stopRecording();
+    }
 }
 
 void GUI::stopRecording()
@@ -394,7 +461,6 @@ void GUI::onProcessingFinished(bool success)
 // =========================================================
 // 6. Python 推理逻辑
 // =========================================================
-
 void GUI::launchPythonInference()
 {
     setUiState(AppState::Inference);
@@ -426,15 +492,14 @@ void GUI::launchPythonInference()
         return;
     }
 
-    // 3. 构建参数
+    // =========================================================
+    // [修改] 3. 构建参数：仅传递 -opt
+    // 最终命令: python test.py -opt real.yml
+    // =========================================================
     QStringList args;
-    args << script_path;
-    args << "-opt" << config_path;
+    args << script_path;         // 脚本路径
+    args << "-opt" << config_path; // 配置文件路径
 
-    // 路径标准化
-    QString cleanPath = m_currentSegmentPath;
-    cleanPath.replace("\\", "/");
-    args << "--dataroot" << cleanPath;
 
     qInfo() << "Launching Python:" << python_executable << args.join(" ");
 
@@ -519,13 +584,10 @@ void GUI::setupPlayback(const QString& segmentPath)
         return;
     }
 
-    // 2. 加载 Python 输出结果 (PNG 序列)
-    // 假设路径结构: segment/deblurred/final_output/*.png
-    QDir resultDir(segmentPath + "/deblurred/final_output");
-    if (!resultDir.exists()) {
-        // 尝试备用路径
-        resultDir.setPath(segmentPath + "/deblurred");
-    }
+    // 2. 加载 Python 输出结果 (从 exe 上级目录的 final_output)
+    QDir appDir(QCoreApplication::applicationDirPath());
+    QString finalOutputPath = QDir::cleanPath(appDir.filePath("../final_output"));
+    QDir resultDir(finalOutputPath);
 
     QStringList filters; filters << "*.png" << "*.jpg";
     QStringList files = resultDir.entryList(filters, QDir::Files, QDir::Name);

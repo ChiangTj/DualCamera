@@ -84,12 +84,18 @@ cv::Mat DVS::getFrame() {
 
 // 开始采集与录制
 // (保持不变)
-void DVS::start(const std::string& name) {
-    // 设置保存文件路径，保存为 raw 格式
-    save_folder = "./" + name + "/" + name + ".raw";
+void DVS::start(const std::string& folder_path, const std::string& file_prefix) {
+    std::string full_path = folder_path + "/" + file_prefix + ".raw";
+    save_folder = full_path;
 
-    cam.start(); // 启动相机数据流
-    cam.start_recording(save_folder); // 开始录制事件数据到指定路径
+    try {
+        cam.start();
+        cam.start_recording(save_folder); // 使用构建好的绝对路径
+        printf("[DVS] Recording to: %s\n", save_folder.c_str());
+    }
+    catch (const std::exception& e) {
+        printf("[DVS Error] Failed to start recording: %s\n", e.what());
+    }
 }
 
 // 停止相机采集
