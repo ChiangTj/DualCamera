@@ -1,79 +1,79 @@
-# DualCamera Real-time Deblur System  
-**Ë«ÉãÊµÊ±È¥Ä£ºýÏµÍ³**
+ï»¿# DualCamera Real-time Deblur System  
+**åŒæ‘„å®žæ—¶åŽ»æ¨¡ç³Šç³»ç»Ÿ**
 
-ÕâÊÇÒ»¸ö»ùÓÚ **C++ (Qt)** Óë **Python (PyTorch)** µÄ»ìºÏ¼Ü¹¹¸ßÐÔÄÜÑÝÊ¾ÏµÍ³¡£ÏµÍ³½áºÏ **RGB ¹¤ÒµÏà»ú** Óë **ÊÂ¼þÏà»ú£¨DVS£©** µÄ»¥²¹ÌØÐÔ£¬ÔÚ¸ßËÙÔË¶¯³¡¾°ÖÐÊµÏÖÊµÊ±Í¼ÏñÈ¥Ä£ºý¡£  
+è¿™æ˜¯ä¸€ä¸ªåŸºäºŽ **C++ (Qt)** ä¸Ž **Python (PyTorch)** çš„æ··åˆæž¶æž„é«˜æ€§èƒ½æ¼”ç¤ºç³»ç»Ÿã€‚ç³»ç»Ÿç»“åˆ **RGB å·¥ä¸šç›¸æœº** ä¸Ž **äº‹ä»¶ç›¸æœºï¼ˆDVSï¼‰** çš„äº’è¡¥ç‰¹æ€§ï¼Œåœ¨é«˜é€Ÿè¿åŠ¨åœºæ™¯ä¸­å®žçŽ°å®žæ—¶å›¾åƒåŽ»æ¨¡ç³Šã€‚  
 
-Ç°¶Ë C++ ¸ºÔðÎ¢Ãë¼¶Ó²¼þÍ¬²½¡¢¸ßËÙÊý¾Ý²É¼¯£¨60FPS @ 500ÍòÏñËØ£©ºÍ¸ßÐÔÄÜÔ¤´¦Àí£»  
-ºó¶Ë Python ¸ºÔðÉî¶ÈÑ§Ï°Ä£ÐÍÍÆÀí£¨Èç EFNet£©£»  
-×îÖÕÔÚ GUI ÊµÏÖ **Â¼ÖÆ¨C´¦Àí¨C»Ø·Å** µÄÒ»Õ¾Ê½ÌåÑé¡£
-
----
-
-## ?? ÏµÍ³¼Ü¹¹
-
-Îª½â¾ö¸ß·Ö±æÂÊ£¨2592¡Á1944£©Óë¸ßÖ¡ÂÊÊý¾ÝÁ÷´øÀ´µÄ´¦ÀíÆ¿¾±£¬ÏµÍ³²ÉÓÃ **ÔÚÏß²É¼¯¨CÁ÷Ë®Ïß´¦Àí** ¼Ü¹¹£º
+å‰ç«¯ C++ è´Ÿè´£å¾®ç§’çº§ç¡¬ä»¶åŒæ­¥ã€é«˜é€Ÿæ•°æ®é‡‡é›†ï¼ˆ60FPS @ 500ä¸‡åƒç´ ï¼‰å’Œé«˜æ€§èƒ½é¢„å¤„ç†ï¼›  
+åŽç«¯ Python è´Ÿè´£æ·±åº¦å­¦ä¹ æ¨¡åž‹æŽ¨ç†ï¼ˆå¦‚ EFNetï¼‰ï¼›  
+æœ€ç»ˆåœ¨ GUI å®žçŽ° **å½•åˆ¶â€“å¤„ç†â€“å›žæ”¾** çš„ä¸€ç«™å¼ä½“éªŒã€‚
 
 ---
 
-## 1. ¸ßËÙ²É¼¯²ã (C++ Backend)
+##  ç³»ç»Ÿæž¶æž„
 
-### RGB Ïà»ú
-- º£¿µÍþÊÓ Hikvision MV-CA050-20GC  
-- ¶àÏß³Ì»º³å³Ø + HDF5 Ö±½ÓÐ´Èë  
-- ³ÖÐø **60FPS ²»µôÖ¡**
-
-### DVS Ïà»ú
-- Prophesee ÊÂ¼þÏà»ú  
-- Ê¹ÓÃ Metavision SDK Â¼ÖÆ EVT3 Êý¾ÝÁ÷
-
-### Ó²¼þÍ¬²½
-- Arduino Uno ×÷Îª´¥·¢Æ÷  
-- TTL ÐÅºÅ±£Ö¤Á½Â·Ïà»úÑÏ¸ñÍ¬²½
+ä¸ºè§£å†³é«˜åˆ†è¾¨çŽ‡ï¼ˆ2592Ã—1944ï¼‰ä¸Žé«˜å¸§çŽ‡æ•°æ®æµå¸¦æ¥çš„å¤„ç†ç“¶é¢ˆï¼Œç³»ç»Ÿé‡‡ç”¨ **åœ¨çº¿é‡‡é›†â€“æµæ°´çº¿å¤„ç†** æž¶æž„ï¼š
 
 ---
 
-## 2. ¸ßÐÔÄÜÔ¤´¦Àí²ã (DataProcessor)
+## 1. é«˜é€Ÿé‡‡é›†å±‚ (C++ Backend)
 
-### ²é±í·¨£¨Lookup Table Remap£©
-Ô¤ÏÈ¼ÆËã×ø±êÓ³Éä±í£¬½« **µ¥Ó¦ÐÔ±ä»» + ²Ã¼ô** ÈÚºÏÎªÒ»´ÎÄÚ´æ²Ù×÷£¬  
-µ¥Ö¡´¦ÀíÊ±¼ä½µµÍ **10 ±¶**¡£
+### RGB ç›¸æœº
+- æµ·åº·å¨è§† Hikvision MV-CA050-20GC  
+- å¤šçº¿ç¨‹ç¼“å†²æ±  + HDF5 ç›´æŽ¥å†™å…¥  
+- æŒç»­ **60FPS ä¸æŽ‰å¸§**
 
-### CPU Ô¤Ë÷Òý£¨Pre-indexing£©
-¶ÔÊÂ¼þÊý¾ÝÊ¹ÓÃ **O(N) »¬¶¯´°¿ÚËã·¨**£¬Ô¤¼ÆËãÃ¿Ö¡ RGB ¶ÔÓ¦µÄÊÂ¼þÊ±¼ä´°£¬  
-±ÜÃâº£Á¿ÊÂ¼þËÑË÷¡£
+### DVS ç›¸æœº
+- Prophesee äº‹ä»¶ç›¸æœº  
+- ä½¿ç”¨ Metavision SDK å½•åˆ¶ EVT3 æ•°æ®æµ
 
-### ²¢ÐÐ¼ÓËÙ
-Remap Óë Voxelization ²ÉÓÃ **OpenMP** È«²¢ÐÐ»¯£¬³ä·ÖÀûÓÃ¶àºËÐÄ CPU¡£
-
----
-
-## 3. Éî¶ÈÍÆÀí²ã (Python Inference)
-
-### ½ºË®²ã
-C++ Ê¹ÓÃ `QProcess` µ÷ÓÃ `model/run_inference.py` ²¢´«µÝÂ·¾¶ºÍÅäÖÃ¡£
-
-### Êý¾Ý¼ÓÔØ
-×Ô¶¨Òå `H5ImageDataset`£¬Ö±½Ó´Ó C++ Éú³ÉµÄ HDF5 ÎÄ¼þÁã¿½±´¼ÓÔØÎª PyTorch Tensor¡£
-
-### Ä£ÐÍ
-¼¯³É BasicSR ¿ò¼Ü£¬¿É¼ÓÔØ»ùÓÚÊÂ¼þ¸¨ÖúµÄÈ¥Ä£ºýÍøÂç£¨Èç EFNet£©¡£
+### ç¡¬ä»¶åŒæ­¥
+- Arduino Uno ä½œä¸ºè§¦å‘å™¨  
+- TTL ä¿¡å·ä¿è¯ä¸¤è·¯ç›¸æœºä¸¥æ ¼åŒæ­¥
 
 ---
 
-## ??? Ó²¼þÓë»·¾³ÒªÇó
+## 2. é«˜æ€§èƒ½é¢„å¤„ç†å±‚ (DataProcessor)
 
-### ¼ÆËãÆ½Ì¨
+### æŸ¥è¡¨æ³•ï¼ˆLookup Table Remapï¼‰
+é¢„å…ˆè®¡ç®—åæ ‡æ˜ å°„è¡¨ï¼Œå°† **å•åº”æ€§å˜æ¢ + è£å‰ª** èžåˆä¸ºä¸€æ¬¡å†…å­˜æ“ä½œï¼Œ  
+å•å¸§å¤„ç†æ—¶é—´é™ä½Ž **10 å€**ã€‚
+
+### CPU é¢„ç´¢å¼•ï¼ˆPre-indexingï¼‰
+å¯¹äº‹ä»¶æ•°æ®ä½¿ç”¨ **O(N) æ»‘åŠ¨çª—å£ç®—æ³•**ï¼Œé¢„è®¡ç®—æ¯å¸§ RGB å¯¹åº”çš„äº‹ä»¶æ—¶é—´çª—ï¼Œ  
+é¿å…æµ·é‡äº‹ä»¶æœç´¢ã€‚
+
+### å¹¶è¡ŒåŠ é€Ÿ
+Remap ä¸Ž Voxelization é‡‡ç”¨ **OpenMP** å…¨å¹¶è¡ŒåŒ–ï¼Œå……åˆ†åˆ©ç”¨å¤šæ ¸å¿ƒ CPUã€‚
+
+---
+
+## 3. æ·±åº¦æŽ¨ç†å±‚ (Python Inference)
+
+### èƒ¶æ°´å±‚
+C++ ä½¿ç”¨ `QProcess` è°ƒç”¨ `model/run_inference.py` å¹¶ä¼ é€’è·¯å¾„å’Œé…ç½®ã€‚
+
+### æ•°æ®åŠ è½½
+è‡ªå®šä¹‰ `H5ImageDataset`ï¼Œç›´æŽ¥ä»Ž C++ ç”Ÿæˆçš„ HDF5 æ–‡ä»¶é›¶æ‹·è´åŠ è½½ä¸º PyTorch Tensorã€‚
+
+### æ¨¡åž‹
+é›†æˆ BasicSR æ¡†æž¶ï¼Œå¯åŠ è½½åŸºäºŽäº‹ä»¶è¾…åŠ©çš„åŽ»æ¨¡ç³Šç½‘ç»œï¼ˆå¦‚ EFNetï¼‰ã€‚
+
+---
+
+##  ç¡¬ä»¶ä¸ŽçŽ¯å¢ƒè¦æ±‚
+
+### è®¡ç®—å¹³å°
 - Windows 10/11 x64  
-- **CPU£ºi7 / i9£¨¶àºËÐÔÄÜ¹Ø¼ü£©**  
-- **RAM£º32GB+**  
-- **GPU£ºNVIDIA RTX 3060 »ò¸ü¸ß£¨¡Ý8GB ÏÔ´æ£©**
+- **CPUï¼ši7 / i9ï¼ˆå¤šæ ¸æ€§èƒ½å…³é”®ï¼‰**  
+- **RAMï¼š32GB+**  
+- **GPUï¼šNVIDIA RTX 3060 æˆ–æ›´é«˜ï¼ˆâ‰¥8GB æ˜¾å­˜ï¼‰**
 
-### ´«¸ÐÆ÷
-- Hikvision ¹¤ÒµÏà»ú£¨GigE£©  
-- Prophesee ÊÂ¼þÏà»ú£¨USB3£©  
-- Arduino Uno£¨Í¬²½°å£©
+### ä¼ æ„Ÿå™¨
+- Hikvision å·¥ä¸šç›¸æœºï¼ˆGigEï¼‰  
+- Prophesee äº‹ä»¶ç›¸æœºï¼ˆUSB3ï¼‰  
+- Arduino Unoï¼ˆåŒæ­¥æ¿ï¼‰
 
-### C++ ÒÀÀµ
+### C++ ä¾èµ–
 - Visual Studio 2019/2022  
 - CMake 3.10+  
 - Qt 5.15 (MSVC)  
@@ -82,17 +82,17 @@ C++ Ê¹ÓÃ `QProcess` µ÷ÓÃ `model/run_inference.py` ²¢´«µÝÂ·¾¶ºÍÅäÖÃ¡£
 - Metavision SDK 4.0+  
 - MVS SDK
 
-### Python ÒÀÀµ
+### Python ä¾èµ–
 - Python 3.8+  
-- PyTorch£¨CUDA£©  
+- PyTorchï¼ˆCUDAï¼‰  
 - h5py, opencv-python, pyyaml, tqdm, scipy  
 - BasicSR
 
 ---
 
-## ?? °²×°Óë¹¹½¨Ö¸ÄÏ
+## ðŸš€ å®‰è£…ä¸Žæž„å»ºæŒ‡å—
 
-### 1. ¿ËÂ¡´úÂë
+### 1. å…‹éš†ä»£ç 
 ```bash
 git clone https://github.com/your-repo/DualCamera-Deblur.git
 cd DualCamera-Deblur
