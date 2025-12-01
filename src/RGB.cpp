@@ -378,7 +378,7 @@ void RGB::processAndQueueFrame(ImageNode* image_node)
 
     // Create ProcessedFrame (Deep Copy)
     ProcessedFrame* p_frame = new ProcessedFrame();
-    p_frame->frame = image_wrapper.clone();
+    cv::flip(image_wrapper, p_frame->frame, 0);
     p_frame->frame_number = image_node->frame_number; // ´«µÝÖ¡ºÅ
 
     // Push to HDF5 Queue

@@ -70,6 +70,7 @@ GUI::GUI(QWidget* parent)
 
     // 4. Python 进程 (推理阶段)
     connect(m_pythonProcess, &QProcess::readyReadStandardOutput, this, &GUI::onPythonOutput);
+    connect(m_pythonProcess, &QProcess::readyReadStandardError, this, &GUI::onPythonError);
     connect(m_pythonProcess, &QProcess::errorOccurred, this, &GUI::onPythonError);
     connect(m_pythonProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
         this, &GUI::onPythonFinished);

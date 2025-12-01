@@ -158,16 +158,16 @@ bool DataProcessor::loadFromRaw()
         );
 
         // 读取 CD 事件
-        cam.cd().add_callback([this, real_h](const Metavision::EventCD* begin, const Metavision::EventCD* end) {
+        cam.cd().add_callback([this](const Metavision::EventCD* begin, const Metavision::EventCD* end) {
             for (const auto* ev = begin; ev != end; ++ev) {
-                // 使用真实高度进行 Y 轴翻转计算，防止下溢
-                uint32_t y_coord = (real_h > ev->y) ? (real_h - 1 - ev->y) : 0;
                 m_events.push_back(Event{
-                    (uint64_t)ev->t, (uint32_t)ev->x, y_coord, (bool)ev->p
+                    (uint64_t)ev->t,
+                    (uint32_t)ev->x,
+                    (uint32_t)ev->y, // 直接使用 ev->y
+                    (bool)ev->p
                     });
             }
             });
-
         // 读取 Trigger 信号
         cam.ext_trigger().add_callback([this](const Metavision::EventExtTrigger* begin, const Metavision::EventExtTrigger* end) {
             for (const auto* ev = begin; ev != end; ++ev) {
