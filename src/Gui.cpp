@@ -1,62 +1,62 @@
 #include "../include/Gui.h"
 #include <QMessageBox>
 #include <QDebug>
+#include <QSizePolicy> // 关键：解决窗口自动放大
 
 // =============================================
 // 构造函数
 // =============================================
 GUI::GUI(QWidget* parent)
     : QMainWindow(parent),
-    // 初始化列表：分别初始化两台相机
-    // 参数：(CameraIndex, Name, DefaultPath)
-    rgb_left(0, "left", "./"),
-    rgb_right(1, "right", "./")
+    rgb_left(0, "left", "./"),   // 初始化左相机 (Index 0)
+    rgb_right(1, "right", "./")  // 初始化右相机 (Index 1)
 {
     is_running = false;
     setWindowTitle("DualCamera Recorder");
-    resize(QSize(1280, 720)); // 调整默认窗口大小
+    resize(QSize(1280, 720));
 
-    // 设置全局字体
     QFont font;
     font.setPointSize(12);
     setFont(font);
 
-    // --- 初始化布局与控件 ---
+    // --- UI 初始化 ---
     buttonLayout = new QHBoxLayout();
     mainLayout = new QVBoxLayout();
     viewLayout = new QHBoxLayout();
     datasetLayout = new QHBoxLayout();
 
-    // 预览窗口
     view_DVS = new QLabel();
     view_RGB = new QLabel();
 
-    // 设置背景色和边框，方便区分
+    // 样式设置
     view_DVS->setStyleSheet("QLabel { background-color : black; border : 1px solid gray; }");
     view_RGB->setStyleSheet("QLabel { background-color : black; border : 1px solid gray; }");
     view_DVS->setAlignment(Qt::AlignCenter);
     view_RGB->setAlignment(Qt::AlignCenter);
 
-    // 默认显示文字
-    view_DVS->setText("<font color='white'>DVS View</font>");
-    view_RGB->setText("<font color='white'>Left RGB View</font>");
+    // 【关键修复 1】设置尺寸策略为 Ignored，防止 setPixmap 撑大窗口
+    view_DVS->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    view_RGB->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
 
-    // 数据集输入区域
+    // 设置最小尺寸
+    view_DVS->setMinimumSize(320, 240);
+    view_RGB->setMinimumSize(320, 240);
+
+    // 数据集输入
     QLabel* datasetLabel = new QLabel(tr("Dataset Name:"));
     datasetInput = new QLineEdit();
-    datasetInput->setPlaceholderText("Enter dataset name (e.g. experiment_01)");
+    datasetInput->setPlaceholderText("Enter dataset name");
     datasetLayout->addWidget(datasetLabel);
     datasetLayout->addWidget(datasetInput);
 
-    // 按钮区域
+    // 按钮
     auto openCameraButton = new QPushButton(tr("Start Recording"));
     auto stopButton = new QPushButton(tr("Stop Recording"));
-    stopButton->setCheckable(true); // 让停止按钮可以保持按下状态（可选）
+    stopButton->setCheckable(true);
 
     buttonLayout->addWidget(openCameraButton);
     buttonLayout->addWidget(stopButton);
 
-    // 组装主界面
     viewLayout->addWidget(view_DVS);
     viewLayout->addWidget(view_RGB);
 
@@ -68,32 +68,29 @@ GUI::GUI(QWidget* parent)
     mainWidget->setLayout(mainLayout);
     setCentralWidget(mainWidget);
 
-    // --- 信号槽连接 ---
     connect(openCameraButton, &QPushButton::clicked, this, &GUI::start);
     connect(stopButton, &QPushButton::clicked, this, &GUI::stoprecord);
 }
 
 GUI::~GUI() {
-    stoprecord(); // 析构时确保停止
+    stoprecord();
 }
 
 // =============================================
 // 开始录制
 // =============================================
 void GUI::start() {
-    // 1. 获取并检查数据集名称
     std::string dataset_name = datasetInput->text().toStdString();
     if (dataset_name.empty()) {
         QMessageBox::warning(this, "Warning", "Please enter a dataset name!");
         return;
     }
 
-    // 2. 准备文件路径
+    // 路径准备
     std::string folder_path = "./" + dataset_name;
     std::string left_folder = folder_path + "/left";
     std::string right_folder = folder_path + "/right";
 
-    // 创建文件夹
     QDir().mkpath(QString::fromStdString(left_folder));
     QDir().mkpath(QString::fromStdString(right_folder));
 
@@ -103,19 +100,22 @@ void GUI::start() {
 
         std::cout << "[GUI] Starting devices..." << std::endl;
 
-        // 3. 启动 RGB 相机
+        // 1. 启动 RGB 相机
         rgb_left.startCapture(left_folder);
         rgb_right.startCapture(right_folder);
 
-        // [可选] 设置相机参数 (曝光时间 us)
-        // rgb_left.setExposureTime(10000);  // 左相机 10ms
-        // rgb_right.setExposureTime(5000);  // 右相机 5ms
+        // 可选：设置参数
+        // rgb_left.setExposureTime(10000);
+        // rgb_right.setExposureTime(5000);
 
-        // 4. 启动其他设备
+        // 2. 启动 DVS (适配新的 start 接口)
+        // 将生成 ./dataset_name/events.raw
         dvs.start(folder_path, "events");
+
+        // 3. 启动触发器
         uno.start();
 
-        // 5. 启动预览线程
+        // 4. 启动预览线程
         DVS_thread = std::thread(&GUI::updateDVS, this);
         RGB_thread = std::thread(&GUI::updateRGB, this);
 
@@ -132,24 +132,23 @@ void GUI::start() {
 void GUI::stoprecord() {
     std::lock_guard<std::mutex> lock(mutex);
     if (is_running) {
-        is_running = false; // 标志位置 false，通知预览线程退出
+        is_running = false; // 停止预览线程循环
 
         std::cout << "[GUI] Stopping recording..." << std::endl;
 
-        // 停止所有设备
         rgb_left.stopCapture();
         rgb_right.stopCapture();
         dvs.stopRecord();
         uno.stop();
 
-        // 恢复 UI 显示
+        // 恢复 UI 状态
         QMetaObject::invokeMethod(view_DVS, [this]() {
             view_DVS->clear();
-            view_DVS->setText("<font color='white'>Stopped</font>");
+            view_DVS->setText("Stopped");
             });
         QMetaObject::invokeMethod(view_RGB, [this]() {
             view_RGB->clear();
-            view_RGB->setText("<font color='white'>Stopped</font>");
+            view_RGB->setText("Stopped");
             });
 
         std::cout << "[GUI] Recording finished." << std::endl;
@@ -157,64 +156,62 @@ void GUI::stoprecord() {
 }
 
 // =============================================
-// 预览线程：DVS
+// DVS 预览线程
 // =============================================
 void GUI::updateDVS() {
-    cv::Size dsize = cv::Size(640, 480); // 调整预览分辨率
+    cv::Size dsize = cv::Size(640, 480);
     cv::Mat temp, frame;
 
     while (is_running) {
-        temp = dvs.getFrame();
+        temp = dvs.getFrame(); // 非阻塞获取
         if (!temp.empty()) {
             cv::resize(temp, frame, dsize, 0, 0, cv::INTER_AREA);
 
-            // DVS 通常输出 RGB 或 Gray，假设这里是 RGB 格式可以直接显示
-            // 务必确保 temp 的数据格式正确
-            auto qimg = QImage(frame.data, frame.cols, frame.rows, frame.step, QImage::Format_RGB888);
+            // 【关键修复 2】深拷贝 (.copy)，防止闪退
+            QImage qimg = QImage(frame.data, frame.cols, frame.rows, frame.step, QImage::Format_RGB888).copy();
 
-            // 使用 invokeMethod 确保在主线程更新 UI (线程安全)
             QMetaObject::invokeMethod(view_DVS, [this, qimg]() {
-                view_DVS->setPixmap(QPixmap::fromImage(qimg).scaled(view_DVS->size(), Qt::KeepAspectRatio));
+                view_DVS->setPixmap(QPixmap::fromImage(qimg).scaled(view_DVS->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
                 });
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+        // 【关键修复 3】降频至 ~30FPS，防止卡顿
+        std::this_thread::sleep_for(std::chrono::milliseconds(33));
     }
 }
 
 // =============================================
-// 预览线程：RGB (Left Camera)
+// RGB 预览线程
 // =============================================
 void GUI::updateRGB() {
     cv::Mat temp;
-    cv::Size dsize = cv::Size(640, 480); // 预览分辨率
+    cv::Size dsize = cv::Size(640, 480);
 
     while (is_running) {
-        // 获取左相机的最新帧
+        // 默认显示左相机画面
         rgb_left.getLatestFrame(&temp);
 
         if (!temp.empty()) {
             cv::Mat frame;
             cv::resize(temp, frame, dsize, 0, 0, cv::INTER_AREA);
 
-            // 【关键】OpenCV 是 BGR 格式，Qt 是 RGB 格式，需要转换颜色空间
-            // 否则显示出来的图片会偏蓝
+            // 颜色空间转换 BGR -> RGB
             cv::cvtColor(frame, frame, cv::COLOR_BGR2RGB);
 
-            // 构造 QImage (注意：frame.data 必须在 setPixmap 前有效，这里因为是局部变量且立即 copy 到 pixmap 所以没问题)
-            auto qimg = QImage(frame.data, frame.cols, frame.rows, frame.step, QImage::Format_RGB888);
+            // 【关键修复 2】深拷贝 (.copy)
+            QImage qimg = QImage(frame.data, frame.cols, frame.rows, frame.step, QImage::Format_RGB888).copy();
 
-            // 线程安全更新 UI
             QMetaObject::invokeMethod(view_RGB, [this, qimg]() {
-                view_RGB->setPixmap(QPixmap::fromImage(qimg).scaled(view_RGB->size(), Qt::KeepAspectRatio));
+                view_RGB->setPixmap(QPixmap::fromImage(qimg).scaled(view_RGB->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
                 });
         }
 
-        // 控制刷新率 (~30fps)
+        // 【关键修复 3】降频至 ~30FPS
         std::this_thread::sleep_for(std::chrono::milliseconds(33));
     }
 }
-
 void GUI::closeEvent(QCloseEvent* event) {
+    // 窗口关闭时自动停止录制，防止后台残留线程
     stoprecord();
     event->accept();
 }
