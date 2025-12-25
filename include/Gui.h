@@ -1,66 +1,55 @@
 #ifndef GUI_H
 #define GUI_H
 
-#include <chrono>
-#include <thread>
-#include <QLabel>
 #include <QMainWindow>
+#include <QLabel>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
-#include <QDateTime>
-#include <QDebug>
-#include <QImage>
-#include <QPushButton>
-#include <QCloseEvent>
-#include <QApplication>
-#include <opencv2/opencv.hpp>
 #include <QLineEdit>
-#include <QMessageBox>
+#include <QPushButton>
+#include <QTimer> // 关键
 #include <mutex>
-
-// 包含设备头文件
 #include "RGB.h"
 #include "DVS.h"
 #include "Uno.h"
+#include <QCloseEvent>
+#include <QApplication>
 
 class GUI : public QMainWindow {
+    Q_OBJECT // 必须添加
+
 public:
     GUI(QWidget* parent = nullptr);
     ~GUI();
 
-    // 核心功能
     void start();
     void stoprecord();
     void closeEvent(QCloseEvent* event) override;
 
-    // 预览线程
-    void updateDVS();
-    void updateRGB();
-
-    // 线程对象
-    std::thread DVS_thread;
-    std::thread RGB_thread;
-
-    // 状态控制
     bool is_running;
     std::mutex mutex;
 
+private slots:
+    // 使用槽函数替代线程循环
+    void updateDvsDisplaySlot();
+    void updateRgbDisplaySlot();
+
 private:
-    // UI 组件
     QLabel* view_DVS;
     QLabel* view_RGB;
-
     QHBoxLayout* buttonLayout;
     QVBoxLayout* mainLayout;
     QHBoxLayout* viewLayout;
     QHBoxLayout* datasetLayout;
-
     QLineEdit* datasetInput;
 
-    // 硬件设备
+    // 定时器替代线程
+    QTimer* m_dvs_display_timer;
+    QTimer* m_rgb_display_timer;
+
     DVS dvs;
-    RGB rgb_left;  // 左相机
-    RGB rgb_right; // 右相机
+    RGB rgb_left;
+    RGB rgb_right;
     UNO uno;
 };
 
