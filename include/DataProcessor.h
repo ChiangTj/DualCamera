@@ -11,9 +11,9 @@
 #include <mutex>
 #include <QThread>
 #include <utility> // for std::pair
-#include <chrono>  // [ĞÂÔö] ¼ÆÊ±Ö§³Ö
-#include <map>     // [ĞÂÔö] Í³¼Æ´æ´¢
-#include <numeric> // [ĞÂÔö] Í³¼Æ¼ÆËã
+#include <chrono>  // [æ–°å¢] è®¡æ—¶æ”¯æŒ
+#include <map>     // [æ–°å¢] ç»Ÿè®¡å­˜å‚¨
+#include <numeric> // [æ–°å¢] ç»Ÿè®¡è®¡ç®—
 #include <algorithm>
 
 // Metavision SDK
@@ -21,7 +21,7 @@
 #include <metavision/sdk/base/events/event_cd.h>
 #include <metavision/sdk/base/events/event_ext_trigger.h>
 
-// ÄÚ²¿½á¹¹Ìå£ºÓÃÓÚ´æ´¢×ª»»ºóµÄÊÂ¼ş
+// å†…éƒ¨ç»“æ„ä½“ï¼šç”¨äºå­˜å‚¨è½¬æ¢åçš„äº‹ä»¶
 struct Event {
     uint64_t t;
     uint32_t x;
@@ -29,23 +29,23 @@ struct Event {
     bool p;
 };
 
-// ÄÚ²¿½á¹¹Ìå£ºÓÃÓÚ´æ´¢´¥·¢ĞÅºÅ
+// å†…éƒ¨ç»“æ„ä½“ï¼šç”¨äºå­˜å‚¨è§¦å‘ä¿¡å·
 struct Trigger {
     uint64_t t;
     short id;
     bool p;
 };
 
-// [ĞÂÔö] ¼òµ¥µÄÏß³Ì°²È«ĞÔÄÜ·ÖÎöÆ÷
+// [æ–°å¢] ç®€å•çš„çº¿ç¨‹å®‰å…¨æ€§èƒ½åˆ†æå™¨
 class SimpleProfiler {
 public:
-    // Ìí¼ÓÒ»Ìõ¼ÇÂ¼ (µ¥Î»: ms)
+    // æ·»åŠ ä¸€æ¡è®°å½• (å•ä½: ms)
     void addRecord(const std::string& name, double ms) {
         std::lock_guard<std::mutex> lock(mtx);
         records[name].push_back(ms);
     }
 
-    // Éú³ÉÍ³¼Æ±¨¸æ
+    // ç”Ÿæˆç»Ÿè®¡æŠ¥å‘Š
     QString getReport() {
         QString report = "\n=== Performance Profile (ms) ===\n";
         report += QString("%1").arg("Name", -20) + QString("%1").arg("Avg", -10) + QString("%1").arg("P50", -10) + QString("%1").arg("P95", -10) + QString("%1").arg("P99", -10) + QString("%1").arg("Count", -10) + "\n";
@@ -55,7 +55,7 @@ public:
             std::vector<double>& v = kv.second;
             if (v.empty()) continue;
 
-            // ÅÅĞòÒÔ¼ÆËã·ÖÎ»Êı
+            // æ’åºä»¥è®¡ç®—åˆ†ä½æ•°
             std::sort(v.begin(), v.end());
 
             double sum = std::accumulate(v.begin(), v.end(), 0.0);
@@ -90,54 +90,90 @@ class DataProcessor : public QObject
     Q_OBJECT
 
 public:
+    enum class Mode {
+        Batch,
+        Realtime
+    };
+
+    struct RealtimeOutput {
+        cv::Mat alignedRgb;
+        std::vector<float> rgbNchw;
+        std::vector<float> voxelGrid;
+    };
+
     explicit DataProcessor(const std::string& segmentPath,
         const cv::Mat& homographyMatrix,
         QObject* parent = nullptr);
     ~DataProcessor();
 
 public slots:
-    // Ö÷´¦ÀíÈë¿Ú
+public:
+    void setMode(Mode mode);
+    void setRealtimeOutputConfig(int rgbWidth, int rgbHeight,
+        int voxelWidth, int voxelHeight,
+        int voxelBins, int voxelCropXMin);
+    bool processRealtimeFrame(const cv::Mat& rgbFrame,
+        const std::vector<Event>& events,
+        uint64_t t_trigger_start,
+        uint64_t t_trigger_end,
+        RealtimeOutput& output);
+
+    void runVoxelization(const std::vector<Event>& events, size_t start_idx, size_t end_idx, float* out_voxel_ptr, uint64_t t_trigger_start, uint64_t t_trigger_end);
+    void ensureRealtimeRemap(int outputWidth, int outputHeight, int voxelCropXMin);
+    void rgbMatToNchw(const cv::Mat& rgbMat, std::vector<float>& outNchw) const;
+    Mode m_mode = Mode::Batch;
+    int m_realtimeRgbW = 0;
+    int m_realtimeRgbH = 0;
+    int m_realtimeVoxelW = 0;
+    int m_realtimeVoxelH = 0;
+    int m_realtimeVoxelBins = 0;
+    int m_realtimeVoxelCropXMin = 0;
+    cv::Mat m_realtimeMapX;
+    cv::Mat m_realtimeMapY;
+    cv::Mat m_realtimeRemapHInv;
+
+    // ä¸»å¤„ç†å…¥å£
     void process();
 
 signals:
-    // ÓÃÓÚÏò GUI ±¨¸æ½ø¶È
+    // ç”¨äºå‘ GUI æŠ¥å‘Šè¿›åº¦
     void progress(const QString& message);
-    // ´¦ÀíÍê³ÉĞÅºÅ
+    // å¤„ç†å®Œæˆä¿¡å·
     void finished(bool success);
 
 private:
-    // --- ²½Öèº¯Êı ---
-    bool loadFromRaw();          // ²½Öè1: ¼ÓÔØ RAW Êı¾İ²¢½øĞĞÔ¤´¦Àí
-    bool createOutputH5();       // ²½Öè3: ³õÊ¼»¯ HDF5 Êä³öÎÄ¼ş½á¹¹
-    bool processFramesChunked(); // ²½Öè4: ·Ö¿é²¢ĞĞ´¦Àí (ºËĞÄÓÅ»¯Âß¼­)
+    // --- æ­¥éª¤å‡½æ•° ---
+    bool loadFromRaw();          // æ­¥éª¤1: åŠ è½½ RAW æ•°æ®å¹¶è¿›è¡Œé¢„å¤„ç†
+    bool createOutputH5();       // æ­¥éª¤3: åˆå§‹åŒ– HDF5 è¾“å‡ºæ–‡ä»¶ç»“æ„
+    bool processFramesChunked(); // æ­¥éª¤4: åˆ†å—å¹¶è¡Œå¤„ç† (æ ¸å¿ƒä¼˜åŒ–é€»è¾‘)
 
-    // --- ºËĞÄËã·¨ ---
-    // [ĞŞ¸Ä] ½ÓÊÕÔ¤¼ÆËãµÄË÷Òı·¶Î§ºÍ Trigger Ê±¼ä·¶Î§
+    // --- æ ¸å¿ƒç®—æ³• ---
+    // [ä¿®æ”¹] æ¥æ”¶é¢„è®¡ç®—çš„ç´¢å¼•èŒƒå›´å’Œ Trigger æ—¶é—´èŒƒå›´
     void runVoxelization(size_t start_idx, size_t end_idx, float* out_voxel_ptr, uint64_t t_trigger_start, uint64_t t_trigger_end);
 
-    // --- ³ÉÔ±±äÁ¿ ---
+    // --- æˆå‘˜å˜é‡ ---
     std::string m_segmentPath;
     std::string m_segmentName;
     cv::Mat m_homo;
 
-    // HDF5 Ïà¹Ø
+    // HDF5 ç›¸å…³
     std::unique_ptr<H5::H5File> m_outputFile;
     H5::DataSet m_rgbOutputDataset;
     H5::DataSet m_voxelOutputDataset;
 
-    // ÄÚ´æÊı¾İÈİÆ÷
+    // å†…å­˜æ•°æ®å®¹å™¨
     std::vector<Event> m_events;
     std::vector<Trigger> m_triggers;
 
-    // [ĞÂÔö] Ô¤¼ÆËãË÷Òı£¬ÓÃÓÚ CPU ÓÅ»¯
+    // [æ–°å¢] é¢„è®¡ç®—ç´¢å¼•ï¼Œç”¨äº CPU ä¼˜åŒ–
     std::vector<std::pair<size_t, size_t>> m_frameEventIndices;
 
     int m_numFrames;
 
-    // [ĞÂÔö] ĞÔÄÜ·ÖÎöÆ÷ÊµÀı
+    // [æ–°å¢] æ€§èƒ½åˆ†æå™¨å®ä¾‹
     SimpleProfiler m_profiler;
 
-    // --- ²ÎÊıÅäÖÃ (ÒÑ¸üĞÂÎªÊÊÅä 500W Ïà»ú) ---
+    // --- å‚æ•°é…ç½® (å·²æ›´æ–°ä¸ºé€‚é… 500W ç›¸æœº) ---
     const int INPUT_RGB_W = 2592;
     const int INPUT_RGB_H = 1944;
 
@@ -150,7 +186,7 @@ private:
 
     const int VOXEL_CROP_X_MIN = 280;
 
-    // ·Ö¿é´óĞ¡ (500W ÏñËØÏÂÄÚ´æÑ¹Á¦´ó£¬½¨ÒéÉèÎª 50)
+    // åˆ†å—å¤§å° (500W åƒç´ ä¸‹å†…å­˜å‹åŠ›å¤§ï¼Œå»ºè®®è®¾ä¸º 50)
     const int CHUNK_SIZE = 50;
 };
 
