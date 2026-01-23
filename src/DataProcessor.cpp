@@ -9,15 +9,44 @@
 #include <omp.h>
 
 // =========================================================
-// ¸¨Öúºê£ºĞÔÄÜ¼ÆÊ±
+    m_numFrames(0),
+    m_mode(Mode::Batch)
+void DataProcessor::setMode(Mode mode)
+{
+    m_mode = mode;
+}
+
+void DataProcessor::setRealtimeOutputConfig(int rgbWidth, int rgbHeight,
+    int voxelWidth, int voxelHeight,
+    int voxelBins, int voxelCropXMin)
+{
+    m_realtimeRgbW = rgbWidth;
+    m_realtimeRgbH = rgbHeight;
+    m_realtimeVoxelW = voxelWidth;
+    m_realtimeVoxelH = voxelHeight;
+    m_realtimeVoxelBins = voxelBins;
+    m_realtimeVoxelCropXMin = voxelCropXMin;
+
+    m_realtimeMapX.release();
+    m_realtimeMapY.release();
+    m_realtimeRemapHInv.release();
+}
+
+
 // =========================================================
+    if (m_mode == Mode::Realtime) {
+        emit progress("Realtime mode active: batch processing disabled.");
+        emit finished(false);
+        return;
+    }
+
 #define TICK(name) auto t_##name = std::chrono::high_resolution_clock::now();
 #define TOCK(name, key) \
     auto d_##name = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - t_##name).count(); \
     m_profiler.addRecord(key, d_##name / 1000.0);
 
 // =========================================================
-// ¹¹ÔìÓëÎö¹¹
+// æ„é€ ä¸ææ„
 // =========================================================
 DataProcessor::DataProcessor(const std::string& segmentPath,
     const cv::Mat& homographyMatrix,
@@ -35,20 +64,20 @@ DataProcessor::~DataProcessor() {
 }
 
 // =========================================================
-// Ö÷´¦ÀíÁ÷³Ì
+// ä¸»å¤„ç†æµç¨‹
 // =========================================================
 void DataProcessor::process()
 {
-    m_profiler.clear(); // Çå³ı¾ÉµÄĞÔÄÜÊı¾İ
+    m_profiler.clear(); // æ¸…é™¤æ—§çš„æ€§èƒ½æ•°æ®
 
     try {
-        // --- Step 1: ¼ÓÔØ RAW Êı¾İ (°üº¬·Ö±æÂÊ×ÔÊÊÓ¦¼ì²â) ---
+        // --- Step 1: åŠ è½½ RAW æ•°æ® (åŒ…å«åˆ†è¾¨ç‡è‡ªé€‚åº”æ£€æµ‹) ---
         emit progress("Step 1/4: Loading RAW data...");
         TICK(load_raw);
         if (!loadFromRaw()) throw std::runtime_error("Failed to load RAW or align frames.");
         TOCK(load_raw, "Step_LoadRaw");
 
-        // --- Step 2: Ô¤¼ÆËãÊÂ¼şË÷Òı (CPU ÓÅ»¯: »¬¶¯´°¿Ú) ---
+        // --- Step 2: é¢„è®¡ç®—äº‹ä»¶ç´¢å¼• (CPU ä¼˜åŒ–: æ»‘åŠ¨çª—å£) ---
         emit progress("Step 2/4: Pre-calculating Event Indices...");
         TICK(pre_index);
 
@@ -62,37 +91,141 @@ void DataProcessor::process()
             uint64_t t_start = m_triggers[i].t;
             uint64_t t_end = m_triggers[i + 1].t;
 
-            // Ñ°ÕÒÆğµã (O(1) ¾ùÌ¯¸´ÔÓ¶È)
+            // å¯»æ‰¾èµ·ç‚¹ (O(1) å‡æ‘Šå¤æ‚åº¦)
             while (current_idx < total_events && m_events[current_idx].t < t_start) {
                 current_idx++;
             }
             size_t start_idx = current_idx;
 
-            // Ñ°ÕÒÖÕµã
+            // å¯»æ‰¾ç»ˆç‚¹
             size_t temp_idx = start_idx;
             while (temp_idx < total_events && m_events[temp_idx].t < t_end) {
                 temp_idx++;
             }
-            size_t end_idx = temp_idx; // ×ó±ÕÓÒ¿ª
+            size_t end_idx = temp_idx; // å·¦é—­å³å¼€
 
             m_frameEventIndices[i] = std::make_pair(start_idx, end_idx);
         }
         TOCK(pre_index, "Step_PreIndex");
 
-        // --- Step 3: ³õÊ¼»¯ HDF5 Êä³ö ---
+        // --- Step 3: åˆå§‹åŒ– HDF5 è¾“å‡º ---
         emit progress("Step 3/4: Creating HDF5 output...");
         if (!createOutputH5()) throw std::runtime_error("Failed to create HDF5.");
 
-        // --- Step 4: ·Ö¿é²¢ĞĞ´¦Àí (²é±í·¨ + OpenMP) ---
+        // --- Step 4: åˆ†å—å¹¶è¡Œå¤„ç† (æŸ¥è¡¨æ³• + OpenMP) ---
         emit progress(QString("Step 4/4: Processing %1 frames (Lookup Table Remap)...").arg(m_numFrames));
         TICK(process_chunked);
         if (!processFramesChunked()) throw std::runtime_error("Error in chunked processing.");
         TOCK(process_chunked, "Step_TotalProcess");
 
-        // ÇåÀí×ÊÔ´
+
+// =========================================================
+// Realtime Processing Helpers
+// =========================================================
+void DataProcessor::ensureRealtimeRemap(int outputWidth, int outputHeight, int voxelCropXMin)
+{
+    if (!m_realtimeMapX.empty() && m_realtimeMapX.cols == outputWidth && m_realtimeMapX.rows == outputHeight) {
+        return;
+    }
+
+    cv::Mat T = cv::Mat::eye(3, 3, CV_64F);
+    T.at<double>(0, 2) = -voxelCropXMin;
+    T.at<double>(1, 2) = 0;
+    cv::Mat H_opt = T * m_homo;
+
+    m_realtimeRemapHInv = H_opt.inv();
+    m_realtimeMapX = cv::Mat(outputHeight, outputWidth, CV_32FC1);
+    m_realtimeMapY = cv::Mat(outputHeight, outputWidth, CV_32FC1);
+
+    for (int y = 0; y < outputHeight; ++y) {
+        for (int x = 0; x < outputWidth; ++x) {
+            double src_z = m_realtimeRemapHInv.at<double>(2, 0) * x + m_realtimeRemapHInv.at<double>(2, 1) * y + m_realtimeRemapHInv.at<double>(2, 2);
+            double scale = (src_z != 0) ? 1.0 / src_z : 1.0;
+
+            double src_x = (m_realtimeRemapHInv.at<double>(0, 0) * x + m_realtimeRemapHInv.at<double>(0, 1) * y + m_realtimeRemapHInv.at<double>(0, 2)) * scale;
+            double src_y = (m_realtimeRemapHInv.at<double>(1, 0) * x + m_realtimeRemapHInv.at<double>(1, 1) * y + m_realtimeRemapHInv.at<double>(1, 2)) * scale;
+
+            m_realtimeMapX.at<float>(y, x) = static_cast<float>(src_x);
+            m_realtimeMapY.at<float>(y, x) = static_cast<float>(src_y);
+        }
+    }
+}
+
+void DataProcessor::rgbMatToNchw(const cv::Mat& rgbMat, std::vector<float>& outNchw) const
+{
+    const int channels = 3;
+    const int height = rgbMat.rows;
+    const int width = rgbMat.cols;
+    outNchw.assign((size_t)channels * height * width, 0.0f);
+
+    for (int y = 0; y < height; ++y) {
+        const cv::Vec3b* row = rgbMat.ptr<cv::Vec3b>(y);
+        for (int x = 0; x < width; ++x) {
+            const cv::Vec3b& pixel = row[x];
+            float r = static_cast<float>(pixel[0]) / 255.0f;
+            float g = static_cast<float>(pixel[1]) / 255.0f;
+            float b = static_cast<float>(pixel[2]) / 255.0f;
+            size_t idx = (size_t)y * width + x;
+            outNchw[idx] = r;
+            outNchw[(size_t)height * width + idx] = g;
+            outNchw[(size_t)2 * height * width + idx] = b;
+        }
+    }
+}
+
+bool DataProcessor::processRealtimeFrame(const cv::Mat& rgbFrame,
+    const std::vector<Event>& events,
+    uint64_t t_trigger_start,
+    uint64_t t_trigger_end,
+    RealtimeOutput& output)
+{
+    if (rgbFrame.empty()) {
+        return false;
+    }
+
+    if (m_realtimeRgbW == 0 || m_realtimeRgbH == 0) {
+        m_realtimeRgbW = rgbFrame.cols;
+        m_realtimeRgbH = rgbFrame.rows;
+    }
+    if (m_realtimeVoxelW == 0 || m_realtimeVoxelH == 0) {
+        m_realtimeVoxelW = VOXEL_W;
+        m_realtimeVoxelH = VOXEL_H;
+    }
+    if (m_realtimeVoxelBins == 0) {
+        m_realtimeVoxelBins = VOXEL_BINS;
+    }
+
+    ensureRealtimeRemap(m_realtimeRgbW, m_realtimeRgbH, m_realtimeVoxelCropXMin);
+
+    auto t_preprocess_start = std::chrono::high_resolution_clock::now();
+
+    output.alignedRgb.create(m_realtimeRgbH, m_realtimeRgbW, CV_8UC3);
+    cv::remap(rgbFrame, output.alignedRgb, m_realtimeMapX, m_realtimeMapY, cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
+
+    rgbMatToNchw(output.alignedRgb, output.rgbNchw);
+
+    size_t voxel_size = (size_t)m_realtimeVoxelBins * m_realtimeVoxelH * m_realtimeVoxelW;
+    output.voxelGrid.assign(voxel_size, 0.0f);
+
+    auto t_voxel_start = std::chrono::high_resolution_clock::now();
+    runVoxelization(events, 0, events.size(), output.voxelGrid.data(), t_trigger_start, t_trigger_end);
+    auto t_voxel_end = std::chrono::high_resolution_clock::now();
+    auto voxel_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_voxel_end - t_voxel_start).count();
+    if (voxel_ms > 15) {
+        qWarning() << "Realtime voxelization exceeded 15ms:" << voxel_ms << "ms";
+    }
+
+    auto t_preprocess_end = std::chrono::high_resolution_clock::now();
+    auto preprocess_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_preprocess_end - t_preprocess_start).count();
+    m_profiler.addRecord("Realtime_Preprocess", static_cast<double>(preprocess_ms));
+
+    return true;
+}
+
+        // æ¸…ç†èµ„æº
         if (m_outputFile) m_outputFile->close();
 
-        // --- Êä³öĞÔÄÜ±¨¸æ ---
+        // --- è¾“å‡ºæ€§èƒ½æŠ¥å‘Š ---
         QString report = m_profiler.getReport();
         qInfo().noquote() << report;
 
@@ -110,12 +243,12 @@ void DataProcessor::process()
 }
 
 // =========================================================
-// Step 1 ÊµÏÖ: ÖÇÄÜ¼ÓÔØÓë¶ÔÆë
+// Step 1 å®ç°: æ™ºèƒ½åŠ è½½ä¸å¯¹é½
 // =========================================================
 bool DataProcessor::loadFromRaw()
 {
-    // 1. ÏÈ¶ÁÈ¡ RGB HDF5 »ñÈ¡ÕæÊµµÄÖ¡ÊıºÍ·Ö±æÂÊ
-    // ·ÀÖ¹Ó²±àÂë·Ö±æÂÊÓëÊµ¼ÊÎÄ¼ş²»·ûµ¼ÖÂ Y Öá·­×ª´íÎó
+    // 1. å…ˆè¯»å– RGB HDF5 è·å–çœŸå®çš„å¸§æ•°å’Œåˆ†è¾¨ç‡
+    // é˜²æ­¢ç¡¬ç¼–ç åˆ†è¾¨ç‡ä¸å®é™…æ–‡ä»¶ä¸ç¬¦å¯¼è‡´ Y è½´ç¿»è½¬é”™è¯¯
     std::string rgb_h5_path = m_segmentPath + "/rgb_data.h5";
     int rgb_count = 0;
     int real_h = 0;
@@ -143,13 +276,13 @@ bool DataProcessor::loadFromRaw()
         return false;
     }
 
-    // 2. ¼ÓÔØ RAW ÊÂ¼şÊı¾İ
+    // 2. åŠ è½½ RAW äº‹ä»¶æ•°æ®
     std::string raw_path = m_segmentPath + "/" + m_segmentName + ".raw";
     if (!QFile::exists(QString::fromStdString(raw_path))) return false;
 
     try {
         auto fsize = std::filesystem::file_size(raw_path);
-        // Ô¤¹ÀÊÂ¼şÊıÁ¿½øĞĞ reserve£¬±ÜÃâ realloc
+        // é¢„ä¼°äº‹ä»¶æ•°é‡è¿›è¡Œ reserveï¼Œé¿å… realloc
         m_events.reserve(fsize / 8);
 
         Metavision::Camera cam = Metavision::Camera::from_file(
@@ -157,21 +290,21 @@ bool DataProcessor::loadFromRaw()
             Metavision::FileConfigHints().real_time_playback(false)
         );
 
-        // ¶ÁÈ¡ CD ÊÂ¼ş
+        // è¯»å– CD äº‹ä»¶
         cam.cd().add_callback([this](const Metavision::EventCD* begin, const Metavision::EventCD* end) {
             for (const auto* ev = begin; ev != end; ++ev) {
                 m_events.push_back(Event{
                     (uint64_t)ev->t,
                     (uint32_t)ev->x,
-                    (uint32_t)ev->y, // Ö±½ÓÊ¹ÓÃ ev->y
+                    (uint32_t)ev->y, // ç›´æ¥ä½¿ç”¨ ev->y
                     (bool)ev->p
                     });
             }
             });
-        // ¶ÁÈ¡ Trigger ĞÅºÅ
+        // è¯»å– Trigger ä¿¡å·
         cam.ext_trigger().add_callback([this](const Metavision::EventExtTrigger* begin, const Metavision::EventExtTrigger* end) {
             for (const auto* ev = begin; ev != end; ++ev) {
-                if (ev->p == 0) { // Ó²¼ş¼«ĞÔĞŞÕı
+                if (ev->p == 0) { // ç¡¬ä»¶ææ€§ä¿®æ­£
                     m_triggers.push_back(Trigger{ (uint64_t)ev->t, ev->id, (bool)ev->p });
                 }
             }
@@ -183,12 +316,12 @@ bool DataProcessor::loadFromRaw()
     }
     catch (...) { return false; }
 
-    // °´Ê±¼äÅÅĞò (È·±£ÓĞĞòĞÔ)
+    // æŒ‰æ—¶é—´æ’åº (ç¡®ä¿æœ‰åºæ€§)
     std::sort(m_events.begin(), m_events.end(), [](const Event& a, const Event& b) {
         return a.t < b.t;
         });
 
-    // ¼ÆËãÓĞĞ§Ö¡Êı (È¡ Trigger ºÍ RGB µÄ½»¼¯)
+    // è®¡ç®—æœ‰æ•ˆå¸§æ•° (å– Trigger å’Œ RGB çš„äº¤é›†)
     if (m_triggers.size() < 2) return false;
     m_numFrames = std::min(rgb_count, (int)m_triggers.size() - 1);
 
@@ -196,7 +329,7 @@ bool DataProcessor::loadFromRaw()
 }
 
 // =========================================================
-// Step 2 ÊµÏÖ: HDF5 ´´½¨
+// Step 2 å®ç°: HDF5 åˆ›å»º
 // =========================================================
 bool DataProcessor::createOutputH5()
 {
@@ -204,11 +337,11 @@ bool DataProcessor::createOutputH5()
         std::string out_path = m_segmentPath + "/processed_data.h5";
         m_outputFile = std::make_unique<H5::H5File>(out_path, H5F_ACC_TRUNC);
 
-        // Êä³ö¶ÔÆëºóµÄ RGB
+        // è¾“å‡ºå¯¹é½åçš„ RGB
         hsize_t rgb_dims[4] = { (hsize_t)m_numFrames, (hsize_t)ALIGNED_RGB_H, (hsize_t)ALIGNED_RGB_W, 3 };
         m_rgbOutputDataset = m_outputFile->createDataSet("rgb_aligned", H5::PredType::NATIVE_UINT8, H5::DataSpace(4, rgb_dims));
 
-        // Êä³ö Voxel Grid
+        // è¾“å‡º Voxel Grid
         hsize_t vox_dims[4] = { (hsize_t)m_numFrames, (hsize_t)VOXEL_BINS, (hsize_t)VOXEL_H, (hsize_t)VOXEL_W };
         m_voxelOutputDataset = m_outputFile->createDataSet("event_voxels", H5::PredType::NATIVE_FLOAT, H5::DataSpace(4, vox_dims));
         return true;
@@ -217,7 +350,7 @@ bool DataProcessor::createOutputH5()
 }
 
 // =========================================================
-// Step 3 ÊµÏÖ: ÖÕ¼«ÓÅ»¯´¦Àí (²é±í + ÄÚ´æ¸´ÓÃ + OpenMP)
+// Step 3 å®ç°: ç»ˆæä¼˜åŒ–å¤„ç† (æŸ¥è¡¨ + å†…å­˜å¤ç”¨ + OpenMP)
 // =========================================================
 bool DataProcessor::processFramesChunked()
 {
@@ -225,35 +358,35 @@ bool DataProcessor::processFramesChunked()
     H5::H5File rgb_inputFile(rgb_h5_path, H5F_ACC_RDONLY);
     H5::DataSet rgb_inputDataset = rgb_inputFile.openDataSet("rgb/frames");
 
-    // Êı¾İ´óĞ¡¼ÆËã (Ê¹ÓÃ 500W ÊÊÅä³£Á¿)
+    // æ•°æ®å¤§å°è®¡ç®— (ä½¿ç”¨ 500W é€‚é…å¸¸é‡)
     size_t raw_rgb_size = (size_t)INPUT_RGB_H * INPUT_RGB_W * 3;
     size_t aligned_rgb_size = (size_t)ALIGNED_RGB_H * ALIGNED_RGB_W * 3;
     size_t voxel_size = (size_t)VOXEL_BINS * VOXEL_H * VOXEL_W;
 
     // -------------------------------------------------------
-    // [ÓÅ»¯ºËĞÄ 1] Ô¤¼ÆËãÓ³Éä±í (Remap Table)
+    // [ä¼˜åŒ–æ ¸å¿ƒ 1] é¢„è®¡ç®—æ˜ å°„è¡¨ (Remap Table)
     // -------------------------------------------------------
     TICK(calc_remap_table);
 
-    // 1. ¹¹Ôì°üº¬Æ½ÒÆµÄÓÅ»¯¾ØÕó (Src -> Cropped Dst)
-    // Ä¿µÄ£º½«²Ã¼ôÇøÓòµÄ×óÉÏ½ÇÒÆ¶¯µ½ (0,0)
+    // 1. æ„é€ åŒ…å«å¹³ç§»çš„ä¼˜åŒ–çŸ©é˜µ (Src -> Cropped Dst)
+    // ç›®çš„ï¼šå°†è£å‰ªåŒºåŸŸçš„å·¦ä¸Šè§’ç§»åŠ¨åˆ° (0,0)
     cv::Mat T = cv::Mat::eye(3, 3, CV_64F);
     T.at<double>(0, 2) = -VOXEL_CROP_X_MIN;
     T.at<double>(1, 2) = 0;
     cv::Mat H_opt = T * m_homo;
 
-    // 2. ¼ÆËãÄæ¾ØÕó (Cropped Dst -> Src)
-    // Remap ĞèÒªµÄÊÇ·´ÏòÓ³Éä£º¶ÔÓÚÃ¿Ò»¸öÊä³öÏñËØ (x,y)£¬ËüÔÚÔ­Í¼µÄÄÄÀï£¿
+    // 2. è®¡ç®—é€†çŸ©é˜µ (Cropped Dst -> Src)
+    // Remap éœ€è¦çš„æ˜¯åå‘æ˜ å°„ï¼šå¯¹äºæ¯ä¸€ä¸ªè¾“å‡ºåƒç´  (x,y)ï¼Œå®ƒåœ¨åŸå›¾çš„å“ªé‡Œï¼Ÿ
     cv::Mat H_inv = H_opt.inv();
 
-    // 3. Éú³É²éÕÒ±í
-    // ³ß´çÖ±½ÓÎª×îÖÕÊä³ö³ß´ç (1000x720)
+    // 3. ç”ŸæˆæŸ¥æ‰¾è¡¨
+    // å°ºå¯¸ç›´æ¥ä¸ºæœ€ç»ˆè¾“å‡ºå°ºå¯¸ (1000x720)
     cv::Mat map_x(ALIGNED_RGB_H, ALIGNED_RGB_W, CV_32FC1);
     cv::Mat map_y(ALIGNED_RGB_H, ALIGNED_RGB_W, CV_32FC1);
 
     for (int y = 0; y < ALIGNED_RGB_H; ++y) {
         for (int x = 0; x < ALIGNED_RGB_W; ++x) {
-            // Æë´Î×ø±êÄæ±ä»»: P_src = H_inv * P_dst
+            // é½æ¬¡åæ ‡é€†å˜æ¢: P_src = H_inv * P_dst
             double src_z = H_inv.at<double>(2, 0) * x + H_inv.at<double>(2, 1) * y + H_inv.at<double>(2, 2);
             double scale = (src_z != 0) ? 1.0 / src_z : 1.0;
 
@@ -267,9 +400,9 @@ bool DataProcessor::processFramesChunked()
     TOCK(calc_remap_table, "Init_RemapTable");
 
     // -------------------------------------------------------
-    // [ÓÅ»¯ºËĞÄ 2] ÄÚ´æ¸´ÓÃ (Memory Reuse)
+    // [ä¼˜åŒ–æ ¸å¿ƒ 2] å†…å­˜å¤ç”¨ (Memory Reuse)
     // -------------------------------------------------------
-    // ½« vector ¶¨ÒåÒÆµ½Ñ­»·Íâ£¬±ÜÃâÔÚÑ­»·ÖĞÖØ¸´ malloc/free
+    // å°† vector å®šä¹‰ç§»åˆ°å¾ªç¯å¤–ï¼Œé¿å…åœ¨å¾ªç¯ä¸­é‡å¤ malloc/free
     std::vector<uint8_t> chunk_raw_rgb;
     std::vector<uint8_t> chunk_out_rgb;
     std::vector<float> chunk_out_voxels;
@@ -284,12 +417,12 @@ bool DataProcessor::processFramesChunked()
         return false;
     }
 
-    // --- Íâ²ãÑ­»·£º°´¿é´¦Àí ---
+    // --- å¤–å±‚å¾ªç¯ï¼šæŒ‰å—å¤„ç† ---
     for (int chunk_start = 0; chunk_start < m_numFrames; chunk_start += CHUNK_SIZE)
     {
         int current_chunk_size = std::min(CHUNK_SIZE, m_numFrames - chunk_start);
 
-        // 1. IO ¶ÁÈ¡ (´®ĞĞ)
+        // 1. IO è¯»å– (ä¸²è¡Œ)
         TICK(io_read);
         hsize_t read_offset[4] = { (hsize_t)chunk_start, 0, 0, 0 };
         hsize_t read_count[4] = { (hsize_t)current_chunk_size, (hsize_t)INPUT_RGB_H, (hsize_t)INPUT_RGB_W, 3 };
@@ -301,30 +434,30 @@ bool DataProcessor::processFramesChunked()
         rgb_inputDataset.read(chunk_raw_rgb.data(), H5::PredType::NATIVE_UINT8, mem_space, file_space);
         TOCK(io_read, "Chunk_IO_Read");
 
-        // 2. ²¢ĞĞ¼ÆËã (Remap + Voxel)
+        // 2. å¹¶è¡Œè®¡ç®— (Remap + Voxel)
 #pragma omp parallel for
         for (int i = 0; i < current_chunk_size; ++i)
         {
             int global_frame_idx = chunk_start + i;
 
-            // Ö¸Õë¶¨Î»
+            // æŒ‡é’ˆå®šä½
             uint8_t* ptr_raw = chunk_raw_rgb.data() + i * raw_rgb_size;
             uint8_t* ptr_out_rgb = chunk_out_rgb.data() + i * aligned_rgb_size;
             float* ptr_out_vox = chunk_out_voxels.data() + i * voxel_size;
 
             std::memset(ptr_out_vox, 0, voxel_size * sizeof(float));
 
-            // [ÓÅ»¯ºËĞÄ 3] Ê¹ÓÃ remap Ìæ´ú warpPerspective
-            // ²é±í·¨¼«¿ì£¬ÎŞ¸¡µã¾ØÕóÔËËã
+            // [ä¼˜åŒ–æ ¸å¿ƒ 3] ä½¿ç”¨ remap æ›¿ä»£ warpPerspective
+            // æŸ¥è¡¨æ³•æå¿«ï¼Œæ— æµ®ç‚¹çŸ©é˜µè¿ç®—
             TICK(remap);
             cv::Mat raw_mat(INPUT_RGB_H, INPUT_RGB_W, CV_8UC3, ptr_raw);
             cv::Mat out_mat(ALIGNED_RGB_H, ALIGNED_RGB_W, CV_8UC3, ptr_out_rgb);
 
-            // map_x ºÍ map_y ÊÇÖ»¶ÁµÄ£¬¶àÏß³Ì°²È«
+            // map_x å’Œ map_y æ˜¯åªè¯»çš„ï¼Œå¤šçº¿ç¨‹å®‰å…¨
             cv::remap(raw_mat, out_mat, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
             TOCK(remap, "Core_Remap");
 
-            // Voxel ´¦Àí
+            // Voxel å¤„ç†
             TICK(voxel);
             size_t start_idx = m_frameEventIndices[global_frame_idx].first;
             size_t end_idx = m_frameEventIndices[global_frame_idx].second;
@@ -335,9 +468,9 @@ bool DataProcessor::processFramesChunked()
             TOCK(voxel, "Core_Voxel");
         }
 
-        // 3. IO Ğ´Èë (´®ĞĞ)
+        // 3. IO å†™å…¥ (ä¸²è¡Œ)
         TICK(io_write);
-        // Ğ´Èë RGB
+        // å†™å…¥ RGB
         hsize_t write_offset_rgb[4] = { (hsize_t)chunk_start, 0, 0, 0 };
         hsize_t write_count_rgb[4] = { (hsize_t)current_chunk_size, (hsize_t)ALIGNED_RGB_H, (hsize_t)ALIGNED_RGB_W, 3 };
         H5::DataSpace fspace_rgb = m_rgbOutputDataset.getSpace();
@@ -345,7 +478,7 @@ bool DataProcessor::processFramesChunked()
         H5::DataSpace mspace_rgb(4, write_count_rgb, NULL);
         m_rgbOutputDataset.write(chunk_out_rgb.data(), H5::PredType::NATIVE_UINT8, mspace_rgb, fspace_rgb);
 
-        // Ğ´Èë Voxel
+        // å†™å…¥ Voxel
         hsize_t write_offset_vox[4] = { (hsize_t)chunk_start, 0, 0, 0 };
         hsize_t write_count_vox[4] = { (hsize_t)current_chunk_size, (hsize_t)VOXEL_BINS, (hsize_t)VOXEL_H, (hsize_t)VOXEL_W };
         H5::DataSpace fspace_vox = m_voxelOutputDataset.getSpace();
@@ -361,7 +494,7 @@ bool DataProcessor::processFramesChunked()
 }
 
 // =========================================================
-// Ëã·¨: ÌåËØ»¯ (±ê×¼ÊµÏÖ)
+// ç®—æ³•: ä½“ç´ åŒ– (æ ‡å‡†å®ç°)
 // =========================================================
 void DataProcessor::runVoxelization(size_t start_idx, size_t end_idx, float* out_voxel_ptr, uint64_t t_trigger_start, uint64_t t_trigger_end)
 {
@@ -375,12 +508,12 @@ void DataProcessor::runVoxelization(size_t start_idx, size_t end_idx, float* out
     for (size_t i = start_idx; i < end_idx; ++i) {
         const Event& ev = m_events[i];
 
-        // ¿Õ¼ä¹ıÂË (Crop)
+        // ç©ºé—´è¿‡æ»¤ (Crop)
         if (ev.x < (uint32_t)VOXEL_CROP_X_MIN) continue;
         int x = (int)ev.x - VOXEL_CROP_X_MIN;
         int y = (int)ev.y;
 
-        // ±ß½ç¼ì²é
+        // è¾¹ç•Œæ£€æŸ¥
         if (x >= VOXEL_W || y >= VOXEL_H || x < 0 || y < 0) continue;
 
         float polarity = ev.p ? 1.0f : -1.0f;
@@ -392,7 +525,7 @@ void DataProcessor::runVoxelization(size_t start_idx, size_t end_idx, float* out
 
         int spatial_idx = y * VOXEL_W + x;
 
-        // Ë«ÏßĞÔ²åÖµĞ´Èë
+        // åŒçº¿æ€§æ’å€¼å†™å…¥
         if (t_idx >= 0 && t_idx < VOXEL_BINS) {
             out_voxel_ptr[t_idx * frame_pixel_count + spatial_idx] += polarity * t_weight_left;
         }
@@ -401,7 +534,68 @@ void DataProcessor::runVoxelization(size_t start_idx, size_t end_idx, float* out
         }
     }
 
-    // ¹éÒ»»¯ (Mean-Std)
+}
+
+void DataProcessor::runVoxelization(const std::vector<Event>& events, size_t start_idx, size_t end_idx, float* out_voxel_ptr, uint64_t t_trigger_start, uint64_t t_trigger_end)
+{
+    if (start_idx >= end_idx || events.empty()) return;
+
+    double deltaT = (double)(t_trigger_end - t_trigger_start);
+    if (deltaT <= 0) deltaT = 1.0;
+    double time_norm_factor = (double)(m_realtimeVoxelBins - 1) / deltaT;
+    int frame_pixel_count = m_realtimeVoxelH * m_realtimeVoxelW;
+
+    for (size_t i = start_idx; i < end_idx; ++i) {
+        const Event& ev = events[i];
+
+        if (ev.x < (uint32_t)m_realtimeVoxelCropXMin) continue;
+        int x = (int)ev.x - m_realtimeVoxelCropXMin;
+        int y = (int)ev.y;
+
+        if (x >= m_realtimeVoxelW || y >= m_realtimeVoxelH || x < 0 || y < 0) continue;
+
+        float polarity = ev.p ? 1.0f : -1.0f;
+        double t_norm = (double)(ev.t - t_trigger_start) * time_norm_factor;
+
+        int t_idx = (int)std::floor(t_norm);
+        float t_weight_right = (float)(t_norm - t_idx);
+        float t_weight_left = 1.0f - t_weight_right;
+
+        int spatial_idx = y * m_realtimeVoxelW + x;
+
+        if (t_idx >= 0 && t_idx < m_realtimeVoxelBins) {
+            out_voxel_ptr[t_idx * frame_pixel_count + spatial_idx] += polarity * t_weight_left;
+        }
+        if (t_idx + 1 >= 0 && t_idx + 1 < m_realtimeVoxelBins) {
+            out_voxel_ptr[(t_idx + 1) * frame_pixel_count + spatial_idx] += polarity * t_weight_right;
+        }
+    }
+
+    int total_size = m_realtimeVoxelBins * frame_pixel_count;
+    double sum = 0.0, sum_sq = 0.0;
+    int num_nonzeros = 0;
+
+    for (int i = 0; i < total_size; ++i) {
+        float val = out_voxel_ptr[i];
+        if (val != 0.0f) {
+            sum += val;
+            sum_sq += (val * val);
+            num_nonzeros++;
+        }
+    }
+
+    if (num_nonzeros > 0) {
+        double mean = sum / num_nonzeros;
+        double variance = (sum_sq / num_nonzeros) - (mean * mean);
+        double stddev = (variance > 0) ? std::sqrt(variance) : 1.0;
+
+        for (int i = 0; i < total_size; ++i) {
+            if (out_voxel_ptr[i] != 0.0f) {
+                out_voxel_ptr[i] = (float)((out_voxel_ptr[i] - mean) / stddev);
+            }
+        }
+    }
+}
     int total_size = VOXEL_BINS * frame_pixel_count;
     double sum = 0.0, sum_sq = 0.0;
     int num_nonzeros = 0;

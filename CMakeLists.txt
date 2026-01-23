@@ -56,9 +56,19 @@ find_package(OpenCV REQUIRED)
 # Qt5
 find_package(Qt5 COMPONENTS Widgets Core Gui REQUIRED)
 
+# CUDA (for TensorRT)
+find_package(CUDAToolkit REQUIRED)
+
+# TensorRT
+find_path(TENSORRT_INCLUDE_DIR NvInfer.h)
+find_library(TENSORRT_LIBRARY nvinfer)
+find_library(TENSORRT_PLUGIN_LIBRARY nvinfer_plugin)
+
 message(STATUS "Qt5 DIR: ${Qt5_DIR}")
 message(STATUS "OpenCV DIR: ${OpenCV_DIR}")
 message(STATUS "HDF5 Libraries: ${HDF5_LIBRARIES}")
+message(STATUS "TensorRT Include: ${TENSORRT_INCLUDE_DIR}")
+message(STATUS "TensorRT Library: ${TENSORRT_LIBRARY}")
 
 # ==============================================
 # 4. 源文件管理
@@ -87,6 +97,7 @@ target_include_directories(dualcamera PUBLIC
     ${MV_INCLUDE_DIR}
     ${HDF5_INCLUDE_DIRS}
     ${MetavisionSDK_INCLUDE_DIRS} # 确保包含 Metavision 头文件
+    ${TENSORRT_INCLUDE_DIR}
 )
 
 # ==============================================
@@ -105,12 +116,40 @@ target_link_libraries(dualcamera
     "${MV_LIB_DIR}/MvCameraControl.lib" # 显式链接静态库/导入库
     ${HDF5_LIBRARIES}     # 通常包含 C 和 CXX
     ${HDF5_HL_LIBRARIES}  # High Level 接口
+    ${TENSORRT_LIBRARY}
+    ${TENSORRT_PLUGIN_LIBRARY}
+    CUDA::cudart
 )
 
 # 链接 OpenMP
 if(OpenMP_CXX_FOUND)
     target_link_libraries(dualcamera PRIVATE OpenMP::OpenMP_CXX)
 endif()
+
+# ==============================================
+# 8. TensorRT 单元测试可执行文件
+# ==============================================
+
+add_executable(trt_inference_test
+    trt_inference_test.cpp
+    src/TrtInference.cpp
+    include/TrtInference.h
+)
+
+target_include_directories(trt_inference_test PUBLIC
+    include
+    ${OpenCV_INCLUDE_DIRS}
+    ${TENSORRT_INCLUDE_DIR}
+)
+
+target_link_libraries(trt_inference_test
+    PRIVATE
+    ${OpenCV_LIBRARIES}
+    Qt5::Core
+    ${TENSORRT_LIBRARY}
+    ${TENSORRT_PLUGIN_LIBRARY}
+    CUDA::cudart
+)
 
 # ==============================================
 # 7. 部署 (可选: 拷贝 DLL 或配置文件)
