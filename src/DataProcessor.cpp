@@ -9,8 +9,8 @@
 #include <omp.h>
 
 // =========================================================
-    m_numFrames(0),
-    m_mode(Mode::Batch)
+// 设置模式
+// =========================================================
 void DataProcessor::setMode(Mode mode)
 {
     m_mode = mode;
@@ -32,14 +32,6 @@ void DataProcessor::setRealtimeOutputConfig(int rgbWidth, int rgbHeight,
     m_realtimeRemapHInv.release();
 }
 
-
-// =========================================================
-    if (m_mode == Mode::Realtime) {
-        emit progress("Realtime mode active: batch processing disabled.");
-        emit finished(false);
-        return;
-    }
-
 #define TICK(name) auto t_##name = std::chrono::high_resolution_clock::now();
 #define TOCK(name, key) \
     auto d_##name = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - t_##name).count(); \
@@ -54,7 +46,8 @@ DataProcessor::DataProcessor(const std::string& segmentPath,
     : QObject(parent),
     m_segmentPath(segmentPath),
     m_homo(homographyMatrix),
-    m_numFrames(0)
+    m_numFrames(0),
+    m_mode(Mode::Batch) // [Fix 1] 修复初始化列表
 {
     m_segmentName = QDir(QString::fromStdString(m_segmentPath)).dirName().toStdString();
 }
@@ -68,6 +61,13 @@ DataProcessor::~DataProcessor() {
 // =========================================================
 void DataProcessor::process()
 {
+    // [Fix 2] 将悬空的 Realtime 检查移入函数开头
+    if (m_mode == Mode::Realtime) {
+        emit progress("Realtime mode active: batch processing disabled.");
+        emit finished(false);
+        return;
+    }
+
     m_profiler.clear(); // 清除旧的性能数据
 
     try {
@@ -118,6 +118,25 @@ void DataProcessor::process()
         if (!processFramesChunked()) throw std::runtime_error("Error in chunked processing.");
         TOCK(process_chunked, "Step_TotalProcess");
 
+        // 清理资源
+        if (m_outputFile) m_outputFile->close();
+
+        // --- 输出性能报告 ---
+        QString report = m_profiler.getReport();
+        qInfo().noquote() << report;
+
+        emit progress("Processing Complete. Check console for perf stats.");
+        emit finished(true);
+    }
+    catch (const std::exception& e) {
+        qWarning() << "Error:" << e.what();
+        emit progress(QString("Error: %1").arg(e.what()));
+        emit finished(false);
+    }
+    catch (...) {
+        emit finished(false);
+    }
+}
 
 // =========================================================
 // Realtime Processing Helpers
@@ -220,26 +239,6 @@ bool DataProcessor::processRealtimeFrame(const cv::Mat& rgbFrame,
     m_profiler.addRecord("Realtime_Preprocess", static_cast<double>(preprocess_ms));
 
     return true;
-}
-
-        // 清理资源
-        if (m_outputFile) m_outputFile->close();
-
-        // --- 输出性能报告 ---
-        QString report = m_profiler.getReport();
-        qInfo().noquote() << report;
-
-        emit progress("Processing Complete. Check console for perf stats.");
-        emit finished(true);
-    }
-    catch (const std::exception& e) {
-        qWarning() << "Error:" << e.what();
-        emit progress(QString("Error: %1").arg(e.what()));
-        emit finished(false);
-    }
-    catch (...) {
-        emit finished(false);
-    }
 }
 
 // =========================================================
@@ -494,7 +493,7 @@ bool DataProcessor::processFramesChunked()
 }
 
 // =========================================================
-// 算法: 体素化 (标准实现)
+// 算法: 体素化 (Batch 模式实现)
 // =========================================================
 void DataProcessor::runVoxelization(size_t start_idx, size_t end_idx, float* out_voxel_ptr, uint64_t t_trigger_start, uint64_t t_trigger_end)
 {
@@ -534,8 +533,36 @@ void DataProcessor::runVoxelization(size_t start_idx, size_t end_idx, float* out
         }
     }
 
+    // [Fix 3] 合并之前悬空在文件末尾的归一化代码
+    int total_size = VOXEL_BINS * frame_pixel_count;
+    double sum = 0.0, sum_sq = 0.0;
+    int num_nonzeros = 0;
+
+    for (int i = 0; i < total_size; ++i) {
+        float val = out_voxel_ptr[i];
+        if (val != 0.0f) {
+            sum += val;
+            sum_sq += (val * val);
+            num_nonzeros++;
+        }
+    }
+
+    if (num_nonzeros > 0) {
+        double mean = sum / num_nonzeros;
+        double variance = (sum_sq / num_nonzeros) - (mean * mean);
+        double stddev = (variance > 0) ? std::sqrt(variance) : 1.0;
+
+        for (int i = 0; i < total_size; ++i) {
+            if (out_voxel_ptr[i] != 0.0f) {
+                out_voxel_ptr[i] = (float)((out_voxel_ptr[i] - mean) / stddev);
+            }
+        }
+    }
 }
 
+// =========================================================
+// 算法: 体素化 (Realtime 模式实现)
+// =========================================================
 void DataProcessor::runVoxelization(const std::vector<Event>& events, size_t start_idx, size_t end_idx, float* out_voxel_ptr, uint64_t t_trigger_start, uint64_t t_trigger_end)
 {
     if (start_idx >= end_idx || events.empty()) return;
@@ -572,31 +599,6 @@ void DataProcessor::runVoxelization(const std::vector<Event>& events, size_t sta
     }
 
     int total_size = m_realtimeVoxelBins * frame_pixel_count;
-    double sum = 0.0, sum_sq = 0.0;
-    int num_nonzeros = 0;
-
-    for (int i = 0; i < total_size; ++i) {
-        float val = out_voxel_ptr[i];
-        if (val != 0.0f) {
-            sum += val;
-            sum_sq += (val * val);
-            num_nonzeros++;
-        }
-    }
-
-    if (num_nonzeros > 0) {
-        double mean = sum / num_nonzeros;
-        double variance = (sum_sq / num_nonzeros) - (mean * mean);
-        double stddev = (variance > 0) ? std::sqrt(variance) : 1.0;
-
-        for (int i = 0; i < total_size; ++i) {
-            if (out_voxel_ptr[i] != 0.0f) {
-                out_voxel_ptr[i] = (float)((out_voxel_ptr[i] - mean) / stddev);
-            }
-        }
-    }
-}
-    int total_size = VOXEL_BINS * frame_pixel_count;
     double sum = 0.0, sum_sq = 0.0;
     int num_nonzeros = 0;
 

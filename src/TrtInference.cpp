@@ -2,6 +2,8 @@
 
 #include <fstream>
 #include <iostream>
+#include <vector>
+#include <numeric>
 
 void TrtLogger::log(Severity severity, const char* msg) noexcept {
     if (severity <= Severity::kWARNING) {
@@ -63,26 +65,33 @@ bool TrtInference::init(const std::string& enginePath) {
 }
 
 bool TrtInference::allocateBuffers() {
-    int bindings = m_engine->getNbBindings();
-    m_gpuBuffers.assign(bindings, nullptr);
-    m_bindingSizes.assign(bindings, 0);
+    // [TensorRT 10 Fix] 使用 getNbIOTensors 替代 getNbBindings
+    int32_t nbIOTensors = m_engine->getNbIOTensors();
+
+    m_gpuBuffers.assign(nbIOTensors, nullptr);
+    m_bindingSizes.assign(nbIOTensors, 0);
     m_inputIndices.clear();
     m_outputIndex = -1;
 
-    for (int i = 0; i < bindings; ++i) {
-        nvinfer1::Dims dims = m_engine->getBindingDimensions(i);
+    for (int32_t i = 0; i < nbIOTensors; ++i) {
+        // [TensorRT 10 Fix] 通过索引获取名称，再通过名称获取属性
+        const char* tensorName = m_engine->getIOTensorName(i);
+        nvinfer1::Dims dims = m_engine->getTensorShape(tensorName);
+
         size_t elements = getSizeByDim(dims);
         size_t bytes = elements * sizeof(float);
         m_bindingSizes[i] = bytes;
 
-        if (m_engine->bindingIsInput(i)) {
+        // [TensorRT 10 Fix] 使用 getTensorIOMode 替代 bindingIsInput
+        if (m_engine->getTensorIOMode(tensorName) == nvinfer1::TensorIOMode::kINPUT) {
             m_inputIndices.push_back(i);
-        } else {
+        }
+        else {
             m_outputIndex = i;
         }
 
         if (cudaMalloc(&m_gpuBuffers[i], bytes) != cudaSuccess) {
-            std::cerr << "Failed to allocate CUDA buffer for binding " << i << std::endl;
+            std::cerr << "Failed to allocate CUDA buffer for tensor: " << tensorName << std::endl;
             return false;
         }
     }
@@ -102,20 +111,31 @@ bool TrtInference::doInference(const std::vector<const float*>& inputHosts, floa
     }
     if (inputHosts.size() != m_inputIndices.size()) {
         std::cerr << "Input count mismatch: expected " << m_inputIndices.size()
-                  << " got " << inputHosts.size() << std::endl;
+            << " got " << inputHosts.size() << std::endl;
         return false;
     }
 
+    // 1. Copy Inputs (Host -> Device)
     for (size_t i = 0; i < inputHosts.size(); ++i) {
-        int binding = m_inputIndices[i];
-        cudaMemcpyAsync(m_gpuBuffers[binding], inputHosts[i], m_bindingSizes[binding], cudaMemcpyHostToDevice, m_stream);
+        int bindingIndex = m_inputIndices[i];
+        cudaMemcpyAsync(m_gpuBuffers[bindingIndex], inputHosts[i], m_bindingSizes[bindingIndex], cudaMemcpyHostToDevice, m_stream);
     }
 
-    if (!m_context->enqueueV2(m_gpuBuffers.data(), m_stream, nullptr)) {
-        std::cerr << "TensorRT enqueue failed." << std::endl;
+    // 2. [TensorRT 10 Fix] Set Tensor Addresses before enqueueV3
+    // TensorRT 10 不再在 enqueue 中接受 buffer 数组，而是需要预先设置
+    int32_t nbIOTensors = m_engine->getNbIOTensors();
+    for (int32_t i = 0; i < nbIOTensors; ++i) {
+        const char* tensorName = m_engine->getIOTensorName(i);
+        m_context->setTensorAddress(tensorName, m_gpuBuffers[i]);
+    }
+
+    // 3. [TensorRT 10 Fix] Run Inference (enqueueV3)
+    if (!m_context->enqueueV3(m_stream)) {
+        std::cerr << "TensorRT enqueueV3 failed." << std::endl;
         return false;
     }
 
+    // 4. Copy Output (Device -> Host)
     cudaMemcpyAsync(outputHost, m_gpuBuffers[m_outputIndex], m_bindingSizes[m_outputIndex], cudaMemcpyDeviceToHost, m_stream);
     cudaStreamSynchronize(m_stream);
 
@@ -130,27 +150,37 @@ nvinfer1::Dims TrtInference::getInputDims(int index) const {
     if (index < 0 || index >= static_cast<int>(m_inputIndices.size())) {
         return nvinfer1::Dims{};
     }
-    return m_engine->getBindingDimensions(m_inputIndices[index]);
+    // [TensorRT 10 Fix] Name-based lookup
+    int bindingIndex = m_inputIndices[index];
+    const char* name = m_engine->getIOTensorName(bindingIndex);
+    return m_engine->getTensorShape(name);
 }
 
 nvinfer1::Dims TrtInference::getOutputDims() const {
     if (m_outputIndex < 0) {
         return nvinfer1::Dims{};
     }
-    return m_engine->getBindingDimensions(m_outputIndex);
+    // [TensorRT 10 Fix] Name-based lookup
+    const char* name = m_engine->getIOTensorName(m_outputIndex);
+    return m_engine->getTensorShape(name);
 }
 
 size_t TrtInference::getOutputElementCount() const {
     if (m_outputIndex < 0) {
         return 0;
     }
-    return getSizeByDim(m_engine->getBindingDimensions(m_outputIndex));
+    // [TensorRT 10 Fix]
+    const char* name = m_engine->getIOTensorName(m_outputIndex);
+    return getSizeByDim(m_engine->getTensorShape(name));
 }
 
 size_t TrtInference::getSizeByDim(const nvinfer1::Dims& dims) const {
     size_t size = 1;
     for (int i = 0; i < dims.nbDims; ++i) {
-        size *= static_cast<size_t>(dims.d[i]);
+        // [Note] Some dimensions might be -1 for dynamic shapes, 
+        // but simple inference usually assumes fixed size here.
+        if (dims.d[i] > 0)
+            size *= static_cast<size_t>(dims.d[i]);
     }
     return size;
 }
