@@ -60,9 +60,24 @@ find_package(Qt5 COMPONENTS Widgets Core Gui REQUIRED)
 find_package(CUDAToolkit REQUIRED)
 
 # TensorRT
-find_path(TENSORRT_INCLUDE_DIR NvInfer.h)
-find_library(TENSORRT_LIBRARY nvinfer)
-find_library(TENSORRT_PLUGIN_LIBRARY nvinfer_plugin)
+option(ENABLE_TENSORRT "Enable TensorRT support" ON)
+set(TENSORRT_ROOT "" CACHE PATH "Path to the TensorRT installation")
+
+if(ENABLE_TENSORRT)
+    find_path(TENSORRT_INCLUDE_DIR NvInfer.h
+        HINTS ${TENSORRT_ROOT} ${TENSORRT_ROOT}/include
+    )
+    find_library(TENSORRT_LIBRARY nvinfer
+        HINTS ${TENSORRT_ROOT} ${TENSORRT_ROOT}/lib ${TENSORRT_ROOT}/lib64
+    )
+    find_library(TENSORRT_PLUGIN_LIBRARY nvinfer_plugin
+        HINTS ${TENSORRT_ROOT} ${TENSORRT_ROOT}/lib ${TENSORRT_ROOT}/lib64
+    )
+
+    if(NOT TENSORRT_INCLUDE_DIR OR NOT TENSORRT_LIBRARY OR NOT TENSORRT_PLUGIN_LIBRARY)
+        message(FATAL_ERROR "TensorRT not found. Set TENSORRT_ROOT or provide TENSORRT_INCLUDE_DIR, TENSORRT_LIBRARY, and TENSORRT_PLUGIN_LIBRARY.")
+    endif()
+endif()
 
 message(STATUS "Qt5 DIR: ${Qt5_DIR}")
 message(STATUS "OpenCV DIR: ${OpenCV_DIR}")
@@ -93,6 +108,9 @@ add_executable(dualcamera
 
 target_include_directories(dualcamera PUBLIC
     include
+)
+
+target_include_directories(dualcamera SYSTEM PRIVATE
     ${OpenCV_INCLUDE_DIRS}
     ${MV_INCLUDE_DIR}
     ${HDF5_INCLUDE_DIRS}
@@ -116,10 +134,13 @@ target_link_libraries(dualcamera
     "${MV_LIB_DIR}/MvCameraControl.lib" # 显式链接静态库/导入库
     ${HDF5_LIBRARIES}     # 通常包含 C 和 CXX
     ${HDF5_HL_LIBRARIES}  # High Level 接口
-    ${TENSORRT_LIBRARY}
-    ${TENSORRT_PLUGIN_LIBRARY}
     CUDA::cudart
 )
+
+# 链接 TensorRT（可选）
+if(ENABLE_TENSORRT)
+    target_link_libraries(dualcamera PRIVATE ${TENSORRT_LIBRARY} ${TENSORRT_PLUGIN_LIBRARY})
+endif()
 
 # 链接 OpenMP
 if(OpenMP_CXX_FOUND)
@@ -130,26 +151,40 @@ endif()
 # 8. TensorRT 单元测试可执行文件
 # ==============================================
 
-add_executable(trt_inference_test
-    trt_inference_test.cpp
-    src/TrtInference.cpp
-    include/TrtInference.h
-)
+if(ENABLE_TENSORRT)
+    add_executable(trt_inference_test
+        trt_inference_test.cpp
+        src/TrtInference.cpp
+        include/TrtInference.h
+    )
 
-target_include_directories(trt_inference_test PUBLIC
-    include
-    ${OpenCV_INCLUDE_DIRS}
-    ${TENSORRT_INCLUDE_DIR}
-)
+    target_include_directories(trt_inference_test PUBLIC
+        include
+    )
 
-target_link_libraries(trt_inference_test
-    PRIVATE
-    ${OpenCV_LIBRARIES}
-    Qt5::Core
-    ${TENSORRT_LIBRARY}
-    ${TENSORRT_PLUGIN_LIBRARY}
-    CUDA::cudart
-)
+    target_include_directories(trt_inference_test SYSTEM PRIVATE
+        ${OpenCV_INCLUDE_DIRS}
+        ${TENSORRT_INCLUDE_DIR}
+    )
+
+    target_link_libraries(trt_inference_test
+        PRIVATE
+        ${OpenCV_LIBRARIES}
+        Qt5::Core
+        ${TENSORRT_LIBRARY}
+        ${TENSORRT_PLUGIN_LIBRARY}
+        CUDA::cudart
+    )
+else()
+    message(STATUS "TensorRT disabled: skipping trt_inference_test target.")
+endif()
+
+if(MSVC)
+    target_compile_options(dualcamera PRIVATE /external:anglebrackets /external:W0)
+    if(TARGET trt_inference_test)
+        target_compile_options(trt_inference_test PRIVATE /external:anglebrackets /external:W0)
+    endif()
+endif()
 
 # ==============================================
 # 7. 部署 (可选: 拷贝 DLL 或配置文件)
