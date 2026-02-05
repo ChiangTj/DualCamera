@@ -1,96 +1,124 @@
-#include "DVS.h" // 假设 .h 文件在 include 目录
+#include "DVS.h"
 
-// 构造函数：初始化 DVS 相机并配置相关模块
 DVS::DVS() {
-    // 从系统中找到第一个可用的 Metavision 相机
     cam = Metavision::Camera::from_first_available();
-
-    // 启用外部触发输入通道（用于接收外部触发信号）
     cam.get_device().get_facility<Metavision::I_TriggerIn>()->enable(Metavision::I_TriggerIn::Channel::Main);
 
-    // 获取相机分辨率
     camera_width = cam.geometry().width();
     camera_height = cam.geometry().height();
 
-    // 设置帧生成的参数
-    acc = 20000;   // 累积时间 (us)，控制多少时间内的事件被用来生成一帧
-    fps = 50;      // 输出帧率 (frames per second)
+    acc = 20000;
+    fps = 50;
 
-    // 创建周期性帧生成器，用于将事件数据转换为固定帧率的视频帧
     frame_gen = new Metavision::PeriodicFrameGenerationAlgorithm(camera_width, camera_height, acc, fps);
 
-    // 创建事件帧生成器（CDFrameGenerator），将事件转换为 OpenCV 的图像
     cd_frame_generator = new Metavision::CDFrameGenerator(camera_width, camera_height);
-    cd_frame_generator->set_display_accumulation_time_us(30000); // 设置显示的事件累积时间窗口 (us)
+    cd_frame_generator->set_display_accumulation_time_us(30000);
+    cd_frame_generator->start(30, [this](const Metavision::timestamp&, const cv::Mat& frame) {
+        if (m_frame_mutex.try_lock()) {
+            m_latest_frame = frame.clone();
+            m_frame_mutex.unlock();
+        }
+    });
 
-    cd_frame_generator->start(
-        30, // 以大约 30 fps 调用回调
+    cam.cd().add_callback([this](const Metavision::EventCD* begin, const Metavision::EventCD* end) {
+        frame_gen->process_events(begin, end);
+        cd_frame_generator->add_events(begin, end);
 
-        // [新的回调，非阻塞]
-        [this](const Metavision::timestamp& ts, const cv::Mat& frame) {
-            if (m_frame_mutex.try_lock())
-            {
-                m_latest_frame = frame.clone();
-                m_frame_mutex.unlock();
+        std::lock_guard<std::mutex> lock(m_realtime_mutex);
+        if (!m_has_window_start) {
+            return;
+        }
+
+        const ptrdiff_t batchSize = end - begin;
+        if (batchSize > 0) {
+            m_current_window_events.reserve(m_current_window_events.size() + static_cast<size_t>(batchSize));
+        }
+
+        for (const auto* ev = begin; ev != end; ++ev) {
+            DvsEvent event;
+            event.t = static_cast<uint64_t>(ev->t);
+            event.x = static_cast<uint32_t>(ev->x);
+            event.y = static_cast<uint32_t>(ev->y);
+            event.p = static_cast<bool>(ev->p);
+            m_current_window_events.push_back(event);
+        }
+    });
+
+    cam.ext_trigger().add_callback([this](const Metavision::EventExtTrigger* begin, const Metavision::EventExtTrigger* end) {
+        std::lock_guard<std::mutex> lock(m_realtime_mutex);
+        for (const auto* ev = begin; ev != end; ++ev) {
+            if (ev->p != 0) {
+                continue;
             }
-        });
 
-    // 注册 CD 事件回调：当相机捕获到事件数据时，将其传入帧生成器
-    cam.cd().add_callback([&](const Metavision::EventCD* begin, const Metavision::EventCD* end) {
-        frame_gen->process_events(begin, end);      // 用于周期性帧生成
-        cd_frame_generator->add_events(begin, end);  // 用于 CD 帧生成
+            const uint64_t timestamp = static_cast<uint64_t>(ev->t);
+            if (m_has_window_start) {
+                DvsEventWindow window;
+                window.sequence = m_next_window_sequence++;
+                window.startTimestamp = m_window_start_timestamp;
+                window.endTimestamp = timestamp;
+                window.events = std::move(m_current_window_events);
 
-        // (注意：你之前的代码没有将事件推入 raw_queue，
-        // 如果你需要保存原始事件，你可能需要在这里添加 raw_queue.push(...))
-        });
+                if (m_completed_windows.size() >= m_max_completed_windows) {
+                    m_completed_windows.pop_front();
+                }
+                m_completed_windows.emplace_back(std::move(window));
+            }
+
+            m_window_start_timestamp = timestamp;
+            m_current_window_events.clear();
+            m_has_window_start = true;
+        }
+    });
 }
 
-// 析构函数：释放资源
 DVS::~DVS() {
     if (cam.is_running()) {
-        cam.stop(); // 停止相机采集
+        cam.stop();
     }
-    if (frame_gen)
-        delete frame_gen; // 释放周期性帧生成器
-    if (cd_frame_generator)
-        delete cd_frame_generator; // 释放事件帧生成器
+    delete frame_gen;
+    delete cd_frame_generator;
 }
 
-// *** 核心修改 (2): 更改 getFrame() 函数 ***
-// 获取一帧图像（从 m_latest_frame 非阻塞地获取）
 cv::Mat DVS::getFrame() {
-
-    // [新的实现，非阻塞]
-    cv::Mat output; // 创建一个空的 Mat
-
-    // 创建一个临时的作用域，以便 lock_guard 及时释放锁
+    cv::Mat output;
     {
         std::lock_guard<std::mutex> lock(m_frame_mutex);
-
-        // 检查 m_latest_frame 是否已经被填充
         if (!m_latest_frame.empty()) {
-            // 深拷贝 (clone) 最新的帧到 output
             output = m_latest_frame.clone();
         }
     }
-    // (互斥锁在此处自动释放)
-
-    // 立即返回 output。
-    // 如果 m_latest_frame 还没有准备好，它将返回一个空 Mat。
-    // 你的 Gui.cpp 中的 updateDvsDisplaySlot() 已经有了
-    // if (temp.empty()) 的检查，所以这是安全的。
     return output;
 }
 
-// 开始采集与录制
-// (保持不变)
+bool DVS::tryPopNextRealtimeWindow(DvsEventWindow& window) {
+    std::lock_guard<std::mutex> lock(m_realtime_mutex);
+    if (m_completed_windows.empty()) {
+        return false;
+    }
+
+    window = std::move(m_completed_windows.front());
+    m_completed_windows.pop_front();
+    return true;
+}
+
 void DVS::start(const std::string& folder_path, const std::string& file_prefix) {
     std::string full_path = folder_path + "/" + file_prefix + ".raw";
     save_folder = full_path;
 
+    {
+        std::lock_guard<std::mutex> lock(m_realtime_mutex);
+        m_current_window_events.clear();
+        m_completed_windows.clear();
+        m_window_start_timestamp = 0;
+        m_next_window_sequence = 0;
+        m_has_window_start = false;
+    }
+
     try {
         cam.start();
-        cam.start_recording(save_folder); // 使用构建好的绝对路径
+        cam.start_recording(save_folder);
         printf("[DVS] Recording to: %s\n", save_folder.c_str());
     }
     catch (const std::exception& e) {
@@ -98,15 +126,18 @@ void DVS::start(const std::string& folder_path, const std::string& file_prefix) 
     }
 }
 
-// 停止相机采集
-// (保持不变)
 void DVS::stop() {
     cam.stop();
 }
 
-// 停止录制并关闭相机
-// (保持不变)
 void DVS::stopRecord() {
-    cam.stop_recording(); // 停止录制
-    cam.stop();           // 停止相机
+    cam.stop_recording();
+    cam.stop();
+
+    std::lock_guard<std::mutex> lock(m_realtime_mutex);
+    m_current_window_events.clear();
+    m_completed_windows.clear();
+    m_window_start_timestamp = 0;
+    m_next_window_sequence = 0;
+    m_has_window_start = false;
 }

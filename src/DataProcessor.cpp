@@ -1,4 +1,4 @@
-#include "../include/DataProcessor.h"
+﻿#include "../include/DataProcessor.h"
 #include <QDir>
 #include <QDebug>
 #include <stdexcept>
@@ -9,7 +9,7 @@
 #include <omp.h>
 
 // =========================================================
-// 设置模式
+// 鐠佸墽鐤嗗Ο鈥崇础
 // =========================================================
 void DataProcessor::setMode(Mode mode)
 {
@@ -38,7 +38,7 @@ void DataProcessor::setRealtimeOutputConfig(int rgbWidth, int rgbHeight,
     m_profiler.addRecord(key, d_##name / 1000.0);
 
 // =========================================================
-// 构造与析构
+// 閺嬪嫰鈧姳绗岄弸鎰€?
 // =========================================================
 DataProcessor::DataProcessor(const std::string& segmentPath,
     const cv::Mat& homographyMatrix,
@@ -47,7 +47,7 @@ DataProcessor::DataProcessor(const std::string& segmentPath,
     m_segmentPath(segmentPath),
     m_homo(homographyMatrix),
     m_numFrames(0),
-    m_mode(Mode::Batch) // [Fix 1] 修复初始化列表
+    m_mode(Mode::Batch)
 {
     m_segmentName = QDir(QString::fromStdString(m_segmentPath)).dirName().toStdString();
 }
@@ -57,28 +57,27 @@ DataProcessor::~DataProcessor() {
 }
 
 // =========================================================
-// 主处理流程
+// 娑撹顦╅悶鍡樼ウ缁?
 // =========================================================
 void DataProcessor::process()
 {
-    // [Fix 2] 将悬空的 Realtime 检查移入函数开头
     if (m_mode == Mode::Realtime) {
         emit progress("Realtime mode active: batch processing disabled.");
         emit finished(false);
         return;
     }
 
-    m_profiler.clear(); // 清除旧的性能数据
+    m_profiler.clear();
 
     try {
-        // --- Step 1: 加载 RAW 数据 (包含分辨率自适应检测) ---
-        emit progress("Step 1/4: Loading RAW data...");
+        // --- Step 1: 閸旂姾娴?RAW 閺佺増宓?(閸栧懎鎯堥崚鍡氶哺閻滃洩鍤滈柅鍌氱安濡偓濞? ---
+        emit progress("Step 1/3: Loading RAW data...");
         TICK(load_raw);
         if (!loadFromRaw()) throw std::runtime_error("Failed to load RAW or align frames.");
         TOCK(load_raw, "Step_LoadRaw");
 
-        // --- Step 2: 预计算事件索引 (CPU 优化: 滑动窗口) ---
-        emit progress("Step 2/4: Pre-calculating Event Indices...");
+        // --- Step 2: 妫板嫯顓哥粻妞剧皑娴犲墎鍌ㄥ?(CPU 娴兼ê瀵? 濠婃垵濮╃粣妤€褰? ---
+        emit progress("Step 2/3: Pre-calculating Event Indices...");
         TICK(pre_index);
 
         m_frameEventIndices.resize(m_numFrames);
@@ -91,41 +90,42 @@ void DataProcessor::process()
             uint64_t t_start = m_triggers[i].t;
             uint64_t t_end = m_triggers[i + 1].t;
 
-            // 寻找起点 (O(1) 均摊复杂度)
             while (current_idx < total_events && m_events[current_idx].t < t_start) {
                 current_idx++;
             }
             size_t start_idx = current_idx;
 
-            // 寻找终点
             size_t temp_idx = start_idx;
             while (temp_idx < total_events && m_events[temp_idx].t < t_end) {
                 temp_idx++;
             }
-            size_t end_idx = temp_idx; // 左闭右开
+            size_t end_idx = temp_idx;
 
             m_frameEventIndices[i] = std::make_pair(start_idx, end_idx);
         }
         TOCK(pre_index, "Step_PreIndex");
 
-        // --- Step 3: 初始化 HDF5 输出 ---
-        emit progress("Step 3/4: Creating HDF5 output...");
-        if (!createOutputH5()) throw std::runtime_error("Failed to create HDF5.");
+        // [娣囶喗鏁糫 閻秵甯€娴?Step 3: Create HDF5閿涘奔绗夐崘宥呭晸閸忋儳鈥栭惄?
 
-        // --- Step 4: 分块并行处理 (查表法 + OpenMP) ---
-        emit progress(QString("Step 4/4: Processing %1 frames (Lookup Table Remap)...").arg(m_numFrames));
+        // --- Step 3: 閸掑棗娼￠獮鎯邦攽婢跺嫮鎮?(閺屻儴銆冨▔?+ OpenMP) 楠炶埖甯瑰ù浣藉殾 TRT ---
+        emit progress(QString("Step 3/3: Processing %1 frames (Lookup Table Remap & TRT Inference)...").arg(m_numFrames));
         TICK(process_chunked);
         if (!processFramesChunked()) throw std::runtime_error("Error in chunked processing.");
         TOCK(process_chunked, "Step_TotalProcess");
 
-        // 清理资源
-        if (m_outputFile) m_outputFile->close();
+        // Send an end-of-stream marker after the last queued frame.
+        if (m_inferenceQueue) {
+            PreprocessPacket endPacket;
+            endPacket.isEndOfStream = true;
+            endPacket.expectedFrameCount = m_numFrames;
+            m_inferenceQueue->push(std::move(endPacket));
+        }
 
-        // --- 输出性能报告 ---
+        // --- 鏉堟挸鍤幀褑鍏橀幎銉ユ啞 ---
         QString report = m_profiler.getReport();
         qInfo().noquote() << report;
 
-        emit progress("Processing Complete. Check console for perf stats.");
+        emit progress("Processing Complete. Displaying results...");
         emit finished(true);
     }
     catch (const std::exception& e) {
@@ -170,6 +170,7 @@ void DataProcessor::ensureRealtimeRemap(int outputWidth, int outputHeight, int v
     }
 }
 
+// Match the TensorRT test path: convert BGR cv::Mat to RGB NCHW in [0, 1].
 void DataProcessor::rgbMatToNchw(const cv::Mat& rgbMat, std::vector<float>& outNchw) const
 {
     const int channels = 3;
@@ -181,9 +182,9 @@ void DataProcessor::rgbMatToNchw(const cv::Mat& rgbMat, std::vector<float>& outN
         const cv::Vec3b* row = rgbMat.ptr<cv::Vec3b>(y);
         for (int x = 0; x < width; ++x) {
             const cv::Vec3b& pixel = row[x];
-            float r = static_cast<float>(pixel[0]) / 255.0f;
+            float r = static_cast<float>(pixel[2]) / 255.0f;
             float g = static_cast<float>(pixel[1]) / 255.0f;
-            float b = static_cast<float>(pixel[2]) / 255.0f;
+            float b = static_cast<float>(pixel[0]) / 255.0f;
             size_t idx = (size_t)y * width + x;
             outNchw[idx] = r;
             outNchw[(size_t)height * width + idx] = g;
@@ -193,7 +194,7 @@ void DataProcessor::rgbMatToNchw(const cv::Mat& rgbMat, std::vector<float>& outN
 }
 
 bool DataProcessor::processRealtimeFrame(const cv::Mat& rgbFrame,
-    const std::vector<Event>& events,
+    const std::vector<DvsEvent>& events,
     uint64_t t_trigger_start,
     uint64_t t_trigger_end,
     RealtimeOutput& output)
@@ -242,12 +243,10 @@ bool DataProcessor::processRealtimeFrame(const cv::Mat& rgbFrame,
 }
 
 // =========================================================
-// Step 1 实现: 智能加载与对齐
+// Step 1 鐎圭偟骞? 閺呴缚鍏橀崝鐘烘祰娑撳骸顕?
 // =========================================================
 bool DataProcessor::loadFromRaw()
 {
-    // 1. 先读取 RGB HDF5 获取真实的帧数和分辨率
-    // 防止硬编码分辨率与实际文件不符导致 Y 轴翻转错误
     std::string rgb_h5_path = m_segmentPath + "/rgb_data.h5";
     int rgb_count = 0;
     int real_h = 0;
@@ -275,13 +274,11 @@ bool DataProcessor::loadFromRaw()
         return false;
     }
 
-    // 2. 加载 RAW 事件数据
     std::string raw_path = m_segmentPath + "/" + m_segmentName + ".raw";
     if (!QFile::exists(QString::fromStdString(raw_path))) return false;
 
     try {
         auto fsize = std::filesystem::file_size(raw_path);
-        // 预估事件数量进行 reserve，避免 realloc
         m_events.reserve(fsize / 8);
 
         Metavision::Camera cam = Metavision::Camera::from_file(
@@ -289,21 +286,19 @@ bool DataProcessor::loadFromRaw()
             Metavision::FileConfigHints().real_time_playback(false)
         );
 
-        // 读取 CD 事件
         cam.cd().add_callback([this](const Metavision::EventCD* begin, const Metavision::EventCD* end) {
             for (const auto* ev = begin; ev != end; ++ev) {
-                m_events.push_back(Event{
+                m_events.push_back(DvsEvent{
                     (uint64_t)ev->t,
                     (uint32_t)ev->x,
-                    (uint32_t)ev->y, // 直接使用 ev->y
+                    (uint32_t)ev->y,
                     (bool)ev->p
                     });
             }
             });
-        // 读取 Trigger 信号
         cam.ext_trigger().add_callback([this](const Metavision::EventExtTrigger* begin, const Metavision::EventExtTrigger* end) {
             for (const auto* ev = begin; ev != end; ++ev) {
-                if (ev->p == 0) { // 硬件极性修正
+                if (ev->p == 0) {
                     m_triggers.push_back(Trigger{ (uint64_t)ev->t, ev->id, (bool)ev->p });
                 }
             }
@@ -315,12 +310,10 @@ bool DataProcessor::loadFromRaw()
     }
     catch (...) { return false; }
 
-    // 按时间排序 (确保有序性)
-    std::sort(m_events.begin(), m_events.end(), [](const Event& a, const Event& b) {
+    std::sort(m_events.begin(), m_events.end(), [](const DvsEvent& a, const DvsEvent& b) {
         return a.t < b.t;
         });
 
-    // 计算有效帧数 (取 Trigger 和 RGB 的交集)
     if (m_triggers.size() < 2) return false;
     m_numFrames = std::min(rgb_count, (int)m_triggers.size() - 1);
 
@@ -328,28 +321,7 @@ bool DataProcessor::loadFromRaw()
 }
 
 // =========================================================
-// Step 2 实现: HDF5 创建
-// =========================================================
-bool DataProcessor::createOutputH5()
-{
-    try {
-        std::string out_path = m_segmentPath + "/processed_data.h5";
-        m_outputFile = std::make_unique<H5::H5File>(out_path, H5F_ACC_TRUNC);
-
-        // 输出对齐后的 RGB
-        hsize_t rgb_dims[4] = { (hsize_t)m_numFrames, (hsize_t)ALIGNED_RGB_H, (hsize_t)ALIGNED_RGB_W, 3 };
-        m_rgbOutputDataset = m_outputFile->createDataSet("rgb_aligned", H5::PredType::NATIVE_UINT8, H5::DataSpace(4, rgb_dims));
-
-        // 输出 Voxel Grid
-        hsize_t vox_dims[4] = { (hsize_t)m_numFrames, (hsize_t)VOXEL_BINS, (hsize_t)VOXEL_H, (hsize_t)VOXEL_W };
-        m_voxelOutputDataset = m_outputFile->createDataSet("event_voxels", H5::PredType::NATIVE_FLOAT, H5::DataSpace(4, vox_dims));
-        return true;
-    }
-    catch (...) { return false; }
-}
-
-// =========================================================
-// Step 3 实现: 终极优化处理 (查表 + 内存复用 + OpenMP)
+// Step 3 鐎圭偟骞? 閺嬩線鈧喎顦╅悶鍡樺腹濞?(閺屻儴銆?+ 閸愬懎鐡ㄦ径宥囨暏 + OpenMP)
 // =========================================================
 bool DataProcessor::processFramesChunked()
 {
@@ -357,35 +329,26 @@ bool DataProcessor::processFramesChunked()
     H5::H5File rgb_inputFile(rgb_h5_path, H5F_ACC_RDONLY);
     H5::DataSet rgb_inputDataset = rgb_inputFile.openDataSet("rgb/frames");
 
-    // 数据大小计算 (使用 500W 适配常量)
     size_t raw_rgb_size = (size_t)INPUT_RGB_H * INPUT_RGB_W * 3;
     size_t aligned_rgb_size = (size_t)ALIGNED_RGB_H * ALIGNED_RGB_W * 3;
     size_t voxel_size = (size_t)VOXEL_BINS * VOXEL_H * VOXEL_W;
 
     // -------------------------------------------------------
-    // [优化核心 1] 预计算映射表 (Remap Table)
+    // [娴兼ê瀵查弽绋跨妇 1] 妫板嫯顓哥粻妤佹Ё鐏忓嫯銆?(Remap Table)
     // -------------------------------------------------------
     TICK(calc_remap_table);
 
-    // 1. 构造包含平移的优化矩阵 (Src -> Cropped Dst)
-    // 目的：将裁剪区域的左上角移动到 (0,0)
     cv::Mat T = cv::Mat::eye(3, 3, CV_64F);
     T.at<double>(0, 2) = -VOXEL_CROP_X_MIN;
     T.at<double>(1, 2) = 0;
     cv::Mat H_opt = T * m_homo;
-
-    // 2. 计算逆矩阵 (Cropped Dst -> Src)
-    // Remap 需要的是反向映射：对于每一个输出像素 (x,y)，它在原图的哪里？
     cv::Mat H_inv = H_opt.inv();
 
-    // 3. 生成查找表
-    // 尺寸直接为最终输出尺寸 (1000x720)
     cv::Mat map_x(ALIGNED_RGB_H, ALIGNED_RGB_W, CV_32FC1);
     cv::Mat map_y(ALIGNED_RGB_H, ALIGNED_RGB_W, CV_32FC1);
 
     for (int y = 0; y < ALIGNED_RGB_H; ++y) {
         for (int x = 0; x < ALIGNED_RGB_W; ++x) {
-            // 齐次坐标逆变换: P_src = H_inv * P_dst
             double src_z = H_inv.at<double>(2, 0) * x + H_inv.at<double>(2, 1) * y + H_inv.at<double>(2, 2);
             double scale = (src_z != 0) ? 1.0 / src_z : 1.0;
 
@@ -399,9 +362,8 @@ bool DataProcessor::processFramesChunked()
     TOCK(calc_remap_table, "Init_RemapTable");
 
     // -------------------------------------------------------
-    // [优化核心 2] 内存复用 (Memory Reuse)
+    // [娴兼ê瀵查弽绋跨妇 2] 閸愬懎鐡ㄦ径宥囨暏 (Memory Reuse)
     // -------------------------------------------------------
-    // 将 vector 定义移到循环外，避免在循环中重复 malloc/free
     std::vector<uint8_t> chunk_raw_rgb;
     std::vector<uint8_t> chunk_out_rgb;
     std::vector<float> chunk_out_voxels;
@@ -416,12 +378,12 @@ bool DataProcessor::processFramesChunked()
         return false;
     }
 
-    // --- 外层循环：按块处理 ---
+    // --- 婢舵牕鐪板顏嗗箚閿涙碍瀵滈崸妤€顦╅悶?---
     for (int chunk_start = 0; chunk_start < m_numFrames; chunk_start += CHUNK_SIZE)
     {
         int current_chunk_size = std::min(CHUNK_SIZE, m_numFrames - chunk_start);
 
-        // 1. IO 读取 (串行)
+        // 1. IO 鐠囪褰?(娑撹尪顢?
         TICK(io_read);
         hsize_t read_offset[4] = { (hsize_t)chunk_start, 0, 0, 0 };
         hsize_t read_count[4] = { (hsize_t)current_chunk_size, (hsize_t)INPUT_RGB_H, (hsize_t)INPUT_RGB_W, 3 };
@@ -433,30 +395,25 @@ bool DataProcessor::processFramesChunked()
         rgb_inputDataset.read(chunk_raw_rgb.data(), H5::PredType::NATIVE_UINT8, mem_space, file_space);
         TOCK(io_read, "Chunk_IO_Read");
 
-        // 2. 并行计算 (Remap + Voxel)
+        // 2. 楠炴儼顢戠拋锛勭暬 (Remap + Voxel)
 #pragma omp parallel for
         for (int i = 0; i < current_chunk_size; ++i)
         {
             int global_frame_idx = chunk_start + i;
 
-            // 指针定位
             uint8_t* ptr_raw = chunk_raw_rgb.data() + i * raw_rgb_size;
             uint8_t* ptr_out_rgb = chunk_out_rgb.data() + i * aligned_rgb_size;
             float* ptr_out_vox = chunk_out_voxels.data() + i * voxel_size;
 
             std::memset(ptr_out_vox, 0, voxel_size * sizeof(float));
 
-            // [优化核心 3] 使用 remap 替代 warpPerspective
-            // 查表法极快，无浮点矩阵运算
             TICK(remap);
             cv::Mat raw_mat(INPUT_RGB_H, INPUT_RGB_W, CV_8UC3, ptr_raw);
             cv::Mat out_mat(ALIGNED_RGB_H, ALIGNED_RGB_W, CV_8UC3, ptr_out_rgb);
 
-            // map_x 和 map_y 是只读的，多线程安全
             cv::remap(raw_mat, out_mat, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
             TOCK(remap, "Core_Remap");
 
-            // Voxel 处理
             TICK(voxel);
             size_t start_idx = m_frameEventIndices[global_frame_idx].first;
             size_t end_idx = m_frameEventIndices[global_frame_idx].second;
@@ -467,33 +424,46 @@ bool DataProcessor::processFramesChunked()
             TOCK(voxel, "Core_Voxel");
         }
 
-        // 3. IO 写入 (串行)
-        TICK(io_write);
-        // 写入 RGB
-        hsize_t write_offset_rgb[4] = { (hsize_t)chunk_start, 0, 0, 0 };
-        hsize_t write_count_rgb[4] = { (hsize_t)current_chunk_size, (hsize_t)ALIGNED_RGB_H, (hsize_t)ALIGNED_RGB_W, 3 };
-        H5::DataSpace fspace_rgb = m_rgbOutputDataset.getSpace();
-        fspace_rgb.selectHyperslab(H5S_SELECT_SET, write_count_rgb, write_offset_rgb);
-        H5::DataSpace mspace_rgb(4, write_count_rgb, NULL);
-        m_rgbOutputDataset.write(chunk_out_rgb.data(), H5::PredType::NATIVE_UINT8, mspace_rgb, fspace_rgb);
+        // 3. [閺嶇绺炬穱顔芥暭] 鐏忓棗顦╅悶鍡楃暚閻ㄥ嫭婀伴幍瑙勵偧閹稿銆庢惔蹇斿腹閸忋儲甯归悶鍡涙Е閸掓绱濋獮璺哄絺闁胶绮?GUI 閺勫墽銇?
+        TICK(push_queue);
+        for (int i = 0; i < current_chunk_size; ++i)
+        {
+            int global_frame_idx = chunk_start + i;
+            uint8_t* ptr_out_rgb = chunk_out_rgb.data() + i * aligned_rgb_size;
+            float* ptr_out_vox = chunk_out_voxels.data() + i * voxel_size;
 
-        // 写入 Voxel
-        hsize_t write_offset_vox[4] = { (hsize_t)chunk_start, 0, 0, 0 };
-        hsize_t write_count_vox[4] = { (hsize_t)current_chunk_size, (hsize_t)VOXEL_BINS, (hsize_t)VOXEL_H, (hsize_t)VOXEL_W };
-        H5::DataSpace fspace_vox = m_voxelOutputDataset.getSpace();
-        fspace_vox.selectHyperslab(H5S_SELECT_SET, write_count_vox, write_offset_vox);
-        H5::DataSpace mspace_vox(4, write_count_vox, NULL);
-        m_voxelOutputDataset.write(chunk_out_voxels.data(), H5::PredType::NATIVE_FLOAT, mspace_vox, fspace_vox);
-        TOCK(io_write, "Chunk_IO_Write");
+            cv::Mat out_mat(ALIGNED_RGB_H, ALIGNED_RGB_W, CV_8UC3, ptr_out_rgb);
 
-        emit progress(QString("Processed %1 / %2 frames...").arg(chunk_start + current_chunk_size).arg(m_numFrames));
+            // 閸欐垿鈧礁顕鎰倵閻ㄥ嫬甯崶鍓х舶 GUI 閻劋绨€佃鐦幘顓熸杹
+            emit blurryFrameReady(out_mat.clone());
+
+            if (m_inferenceQueue) {
+                PreprocessPacket packet;
+                packet.frameIndex = global_frame_idx;
+                packet.outputWidth = ALIGNED_RGB_W;
+                packet.outputHeight = ALIGNED_RGB_H;
+                packet.outputChannels = 3;
+
+                // Normalize to [0, 1] and convert to NCHW.
+                rgbMatToNchw(out_mat, packet.rgbTensor);
+
+                // 閹风柉绀?Voxel
+                size_t vox_len = (size_t)VOXEL_BINS * VOXEL_H * VOXEL_W;
+                packet.voxelTensor.assign(ptr_out_vox, ptr_out_vox + vox_len);
+
+                m_inferenceQueue->push(std::move(packet));
+            }
+        }
+        TOCK(push_queue, "Chunk_Push_Queue");
+
+        emit progress(QString("Processed and Inference Queued: %1 / %2 frames...").arg(chunk_start + current_chunk_size).arg(m_numFrames));
     }
 
     return true;
 }
 
 // =========================================================
-// 算法: 体素化 (Batch 模式实现)
+// 缁犳纭? 娴ｆ挾绀岄崠?(Batch 濡€崇础鐎圭偟骞?
 // =========================================================
 void DataProcessor::runVoxelization(size_t start_idx, size_t end_idx, float* out_voxel_ptr, uint64_t t_trigger_start, uint64_t t_trigger_end)
 {
@@ -505,14 +475,12 @@ void DataProcessor::runVoxelization(size_t start_idx, size_t end_idx, float* out
     int frame_pixel_count = VOXEL_H * VOXEL_W;
 
     for (size_t i = start_idx; i < end_idx; ++i) {
-        const Event& ev = m_events[i];
+        const DvsEvent& ev = m_events[i];
 
-        // 空间过滤 (Crop)
         if (ev.x < (uint32_t)VOXEL_CROP_X_MIN) continue;
         int x = (int)ev.x - VOXEL_CROP_X_MIN;
         int y = (int)ev.y;
 
-        // 边界检查
         if (x >= VOXEL_W || y >= VOXEL_H || x < 0 || y < 0) continue;
 
         float polarity = ev.p ? 1.0f : -1.0f;
@@ -524,7 +492,6 @@ void DataProcessor::runVoxelization(size_t start_idx, size_t end_idx, float* out
 
         int spatial_idx = y * VOXEL_W + x;
 
-        // 双线性插值写入
         if (t_idx >= 0 && t_idx < VOXEL_BINS) {
             out_voxel_ptr[t_idx * frame_pixel_count + spatial_idx] += polarity * t_weight_left;
         }
@@ -533,7 +500,6 @@ void DataProcessor::runVoxelization(size_t start_idx, size_t end_idx, float* out
         }
     }
 
-    // [Fix 3] 合并之前悬空在文件末尾的归一化代码
     int total_size = VOXEL_BINS * frame_pixel_count;
     double sum = 0.0, sum_sq = 0.0;
     int num_nonzeros = 0;
@@ -561,9 +527,9 @@ void DataProcessor::runVoxelization(size_t start_idx, size_t end_idx, float* out
 }
 
 // =========================================================
-// 算法: 体素化 (Realtime 模式实现)
+// 缁犳纭? 娴ｆ挾绀岄崠?(Realtime 濡€崇础鐎圭偟骞?
 // =========================================================
-void DataProcessor::runVoxelization(const std::vector<Event>& events, size_t start_idx, size_t end_idx, float* out_voxel_ptr, uint64_t t_trigger_start, uint64_t t_trigger_end)
+void DataProcessor::runVoxelization(const std::vector<DvsEvent>& events, size_t start_idx, size_t end_idx, float* out_voxel_ptr, uint64_t t_trigger_start, uint64_t t_trigger_end)
 {
     if (start_idx >= end_idx || events.empty()) return;
 
@@ -573,7 +539,7 @@ void DataProcessor::runVoxelization(const std::vector<Event>& events, size_t sta
     int frame_pixel_count = m_realtimeVoxelH * m_realtimeVoxelW;
 
     for (size_t i = start_idx; i < end_idx; ++i) {
-        const Event& ev = events[i];
+        const DvsEvent& ev = events[i];
 
         if (ev.x < (uint32_t)m_realtimeVoxelCropXMin) continue;
         int x = (int)ev.x - m_realtimeVoxelCropXMin;

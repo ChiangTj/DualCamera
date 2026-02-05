@@ -12,7 +12,11 @@
 #include "TrtInference.h"
 
 struct PreprocessPacket {
-    std::vector<float> inputTensor;
+    int frameIndex = -1;
+    bool isEndOfStream = false;
+    int expectedFrameCount = 0;
+    std::vector<float> rgbTensor;
+    std::vector<float> voxelTensor;
     int outputWidth = 0;
     int outputHeight = 0;
     int outputChannels = 0;
@@ -31,7 +35,8 @@ public slots:
     void stop();
 
 signals:
-    void resultReady(const QImage& image);
+    void resultReady(int frameIndex, const QImage& image);
+    void streamFinished(int expectedFrameCount);
     void inferenceError(const QString& message);
 
 private:

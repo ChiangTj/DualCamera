@@ -3,37 +3,48 @@
 
 #include <MvCameraControl.h>
 #include <opencv2/opencv.hpp>
+
+#include <H5Cpp.h>
+#include <QDateTime>
+#include <QDir>
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <queue>
+#include <string>
+#include <thread>
+#include <tuple>
+#include <vector>
+
 #include "DataQueue.h"
 #include "DataStack.h"
 #include "ThreadPool.h"
-#include <QDateTime>
-#include <QDir>
-#include <fstream>
-#include <chrono>
-#include <mutex>
-#include <condition_variable>
-#include <thread>
-#include <H5Cpp.h> 
-#include <memory>  
 
 class RGB {
 public:
-    // ==================== Public Interface ====================
+    using FrameReadyCallback = std::function<void(cv::Mat frame, unsigned int frameNumber)>;
+
     RGB();
     ~RGB();
 
-    // Camera control
     void startCapture(const std::string& save_path);
     void stopCapture();
-
-    // Image access (for GUI Live Preview)
     void getLatestFrame(cv::Mat* output_frame);
+    void setFrameReadyCallback(FrameReadyCallback callback);
 
-    // Status flag
-    bool is_recording;
+    bool is_recording = false;
 
 private:
-    // ==================== Internal Types ====================
     struct ImageNode {
         unsigned char* image_data = nullptr;
         uint64_t data_length = 0;
@@ -50,13 +61,11 @@ private:
         }
     };
 
-    // 已处理好、待写入HDF5的帧
     struct ProcessedFrame {
-        cv::Mat frame;       // BGR 格式
-        unsigned int frame_number;
+        cv::Mat frame;
+        unsigned int frame_number = 0;
     };
 
-    // Semaphore class (信号量，用于线程同步)
     class Semaphore {
     public:
         explicit Semaphore(long initial_count = 0) : count(initial_count) {}
@@ -70,12 +79,13 @@ private:
 
         bool wait(int timeout_seconds) {
             std::unique_lock<std::mutex> lock(mutex);
-            bool success = condition.wait_for(
+            const bool success = condition.wait_for(
                 lock,
                 std::chrono::seconds(timeout_seconds),
-                [&]() { return count > 0; }
-            );
-            if (success) --count;
+                [&]() { return count > 0; });
+            if (success) {
+                --count;
+            }
             return success;
         }
 
@@ -97,82 +107,75 @@ private:
         long count = 0;
     };
 
-    ThreadPool* thread_pool;
-    std::thread task_distribution_thread;
-
-    void distributeTasksThread();
-
-    // ==================== Camera State ====================
-    bool task_stop = false;
-    bool is_initialized = false;
-    bool is_saving = false;
-    bool should_exit = false;
-    int nRet;
-    int frame_counter = 0;
-    unsigned int nImageNodeNum;
-    std::string save_folder;
-
-    // ==================== Camera Hardware ====================
-    void* camera_handle = nullptr;
-    unsigned char* rgb_buffer = nullptr;
-    unsigned int image_node_count = 200;
-
-    // ==================== Camera SDK Structures ====================
-    MV_CC_DEVICE_INFO_LIST device_list;
-    MVCC_INTVALUE int_value_params;
-    MV_FRAME_OUT output_frame;
-    MV_CC_PIXEL_CONVERT_PARAM pixel_convert_params;
-    MV_CC_IMAGE image_params;
-    MV_CC_SAVE_IMAGE_PARAM image_save_params;
-
-    // ==================== Threading ====================
-    std::thread hdf5_writer_thread; // HDF5 专用写入线程
-    std::mutex task_mutex;
-    std::mutex display_mutex;
-    Semaphore image_semaphore;
-    std::vector<std::thread> worker_threads;
-    std::queue<std::function<void()>> task_queue;
-    std::condition_variable task_cv;
-
-    // ==================== Data Structures ====================
-    DataQueue<ImageNode*> image_queue; // L1: Callback -> Distributor
-    DataQueue<ProcessedFrame*> hdf5_write_queue; // L2: Pool -> HDF5 Writer
-    LimitedStack<cv::Mat> display_stack{ 3 }; // L3: For GUI Display
-
-    // ==================== HDF5 Members ====================
-    std::unique_ptr<H5::H5File> h5_file;
-    H5::DataSet h5_rgb_dataset;         // 图像数据集
-    hsize_t h5_rgb_dims[4];             // 图像维度
-
-    // [新增] 帧号数据集
-    H5::DataSet h5_frame_num_dataset;
-
-    std::mutex h5_mutex;
-
-    // ==================== Private Methods ====================
-    // Initialization
     void initializeInternalParameters();
     bool initializeCameraSDK();
     bool enumerateAndSelectCamera();
     bool allocateImageBuffers();
     bool configureCameraSettings();
 
-    // Resource management
     void cleanupResources();
     void clearImageQueue();
+    void clearProcessedFrameQueue();
     void clearHDF5Queue();
 
-    // Thread functions
     static void imageCallback(unsigned char* image_data, MV_FRAME_OUT_INFO_EX* frame_info, void* user_data);
+    void distributeTasksThread();
     void processAndQueueFrame(ImageNode* image_node);
+    void orderedDispatchLoop();
+    void dispatchProcessedFrame(ProcessedFrame* frame);
     void hdf5WriteLoop();
 
-    // HDF5 Helper Functions
     bool initializeHDF5(const std::string& base_path);
     void extendAndWriteHDF5(ProcessedFrame* frame);
     void closeHDF5();
 
-    // Disallow copying
+    ThreadPool* thread_pool = nullptr;
+    std::thread task_distribution_thread;
+    std::thread ordered_dispatch_thread;
+    std::thread hdf5_writer_thread;
+
+    bool task_stop = false;
+    bool is_initialized = false;
+    bool is_saving = false;
+    bool should_exit = false;
+    int nRet = MV_OK;
+    int frame_counter = 0;
+    unsigned int nImageNodeNum = 200;
+    std::string save_folder;
+    std::atomic<bool> m_workersDone{ false };
+    std::atomic<bool> m_dispatchDone{ false };
+
+    void* camera_handle = nullptr;
+    unsigned char* rgb_buffer = nullptr;
+    unsigned int image_node_count = 200;
+
+    MV_CC_DEVICE_INFO_LIST device_list{};
+    MVCC_INTVALUE int_value_params{};
+    MV_FRAME_OUT output_frame{};
+    MV_CC_PIXEL_CONVERT_PARAM pixel_convert_params{};
+    MV_CC_IMAGE image_params{};
+    MV_CC_SAVE_IMAGE_PARAM image_save_params{};
+
+    std::mutex task_mutex;
+    std::mutex display_mutex;
+    std::mutex callback_mutex;
+    Semaphore image_semaphore;
+    std::vector<std::thread> worker_threads;
+    std::queue<std::function<void()>> task_queue;
+    std::condition_variable task_cv;
+    FrameReadyCallback m_frameReadyCallback;
+
+    DataQueue<ImageNode*> image_queue;
+    DataQueue<ProcessedFrame*> processed_frame_queue;
+    DataQueue<ProcessedFrame*> hdf5_write_queue;
+    LimitedStack<cv::Mat> display_stack{ 3 };
+
+    std::unique_ptr<H5::H5File> h5_file;
+    H5::DataSet h5_rgb_dataset;
+    H5::DataSet h5_frame_num_dataset;
+    hsize_t h5_rgb_dims[4]{};
+    std::mutex h5_mutex;
+
     RGB(const RGB&) = delete;
     RGB& operator=(const RGB&) = delete;
 };

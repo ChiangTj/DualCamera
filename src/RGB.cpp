@@ -1,47 +1,37 @@
 #include "RGB.h"
-#include <H5Cpp.h>
-#include <memory>
-#include <cstdio> // for printf
 
-// =============================================
-// Initialization and Cleanup
-// =============================================
+#include <map>
+#include <memory>
 
 void RGB::initializeInternalParameters()
 {
-    // Reset counters and flags
     frame_counter = 0;
     is_saving = false;
     should_exit = false;
     is_initialized = false;
     is_recording = false;
     task_stop = false;
+    m_workersDone.store(false);
+    m_dispatchDone.store(false);
 
-    // Clear data structures
     image_queue.clear();
+    processed_frame_queue.clear();
     hdf5_write_queue.clear();
 
-    // Initialize camera parameters
     nRet = MV_OK;
     camera_handle = nullptr;
     nImageNodeNum = 200;
-
-    // Initialize buffers
     rgb_buffer = nullptr;
 
-    // Initialize camera SDK structures
     memset(&device_list, 0, sizeof(MV_CC_DEVICE_INFO_LIST));
     memset(&pixel_convert_params, 0, sizeof(MV_CC_PIXEL_CONVERT_PARAM));
     memset(&output_frame, 0, sizeof(MV_FRAME_OUT));
     memset(&image_save_params, 0, sizeof(MV_CC_SAVE_IMAGE_PARAM));
     memset(&int_value_params, 0, sizeof(MVCC_INTVALUE));
 
-    thread_pool = nullptr;
-
-    // Initialize HDF5 members
-    h5_file.reset(); 
-    h5_rgb_dataset = H5::DataSet(); 
-    h5_frame_num_dataset = H5::DataSet(); // [新增] 初始化
+    h5_file.reset();
+    h5_rgb_dataset = H5::DataSet();
+    h5_frame_num_dataset = H5::DataSet();
 }
 
 RGB::RGB()
@@ -65,10 +55,6 @@ RGB::~RGB()
     cleanupResources();
 }
 
-// =============================================
-// Camera Initialization Helpers
-// =============================================
-
 bool RGB::initializeCameraSDK()
 {
     nRet = MV_CC_Initialize();
@@ -91,13 +77,13 @@ bool RGB::enumerateAndSelectCamera()
         printf("No compatible cameras found!\n");
         return false;
     }
-    
+
     nRet = MV_CC_CreateHandle(&camera_handle, device_list.pDeviceInfo[0]);
     if (MV_OK != nRet) {
         printf("Failed to create camera handle! Error: [0x%x]\n", nRet);
         return false;
     }
-    
+
     nRet = MV_CC_OpenDevice(camera_handle);
     if (MV_OK != nRet) {
         printf("Failed to open camera device! Error: [0x%x]\n", nRet);
@@ -115,8 +101,8 @@ bool RGB::allocateImageBuffers()
     MV_CC_GetIntValue(camera_handle, "Width", &width);
     MV_CC_GetIntValue(camera_handle, "Height", &height);
 
-    size_t buffer_size = width.nCurValue * height.nCurValue * 3;
-    rgb_buffer = (unsigned char*)malloc(buffer_size);
+    const size_t buffer_size = width.nCurValue * height.nCurValue * 3;
+    rgb_buffer = static_cast<unsigned char*>(malloc(buffer_size));
     if (rgb_buffer == nullptr) {
         printf("Failed to allocate memory for RGB buffer!\n");
         cleanupResources();
@@ -128,11 +114,10 @@ bool RGB::allocateImageBuffers()
 
 bool RGB::configureCameraSettings()
 {
-    // Configure trigger settings (Rising Edge Trigger)
     const std::vector<std::tuple<const char*, int, const char*>> settings = {
         {"TriggerMode", 1, "Trigger Mode"},
         {"TriggerSource", 0, "Trigger Source"},
-        {"TriggerActivation", 0, "Trigger Activation"}, 
+        {"TriggerActivation", 0, "Trigger Activation"},
         {"OverlapMode", 1, "Overlap Mode"}
     };
 
@@ -155,10 +140,6 @@ bool RGB::configureCameraSettings()
     return true;
 }
 
-// =============================================
-// Resource Management
-// =============================================
-
 void RGB::cleanupResources()
 {
     if (rgb_buffer != nullptr) {
@@ -180,21 +161,31 @@ void RGB::clearImageQueue()
 {
     ImageNode* node = nullptr;
     while (image_queue.try_pop(node)) {
-        if (node) delete node;
+        if (node) {
+            delete node;
+        }
+    }
+}
+
+void RGB::clearProcessedFrameQueue()
+{
+    ProcessedFrame* frame = nullptr;
+    while (processed_frame_queue.try_pop(frame)) {
+        if (frame) {
+            delete frame;
+        }
     }
 }
 
 void RGB::clearHDF5Queue()
 {
-    ProcessedFrame* frame_ptr = nullptr;
-    while (hdf5_write_queue.try_pop(frame_ptr)) {
-        if (frame_ptr) delete frame_ptr;
+    ProcessedFrame* frame = nullptr;
+    while (hdf5_write_queue.try_pop(frame)) {
+        if (frame) {
+            delete frame;
+        }
     }
 }
-
-// =============================================
-// Camera Control
-// =============================================
 
 void RGB::startCapture(const std::string& save_path)
 {
@@ -203,37 +194,49 @@ void RGB::startCapture(const std::string& save_path)
         return;
     }
 
-    // Initialize HDF5 (with frame_nums)
+    clearImageQueue();
+    clearProcessedFrameQueue();
+    clearHDF5Queue();
+
     if (!initializeHDF5(save_path)) {
         printf("Failed to initialize HDF5 file.\n");
         return;
     }
 
-    // Thread pool
     const size_t num_threads = 6;
     thread_pool = new ThreadPool(num_threads);
 
-    // Register callback
+    should_exit = false;
+    is_saving = true;
+    is_recording = true;
+    m_workersDone.store(false);
+    m_dispatchDone.store(false);
+
     nRet = MV_CC_RegisterImageCallBackEx(camera_handle, imageCallback, this);
     if (MV_OK != nRet) {
         printf("Failed to register image callback! Error: [0x%x]\n", nRet);
+        delete thread_pool;
+        thread_pool = nullptr;
+        is_saving = false;
+        is_recording = false;
         closeHDF5();
         return;
     }
 
-    // Start grabbing
     nRet = MV_CC_StartGrabbing(camera_handle);
     if (MV_OK != nRet) {
         printf("Failed to start grabbing! Error: [0x%x]\n", nRet);
+        MV_CC_RegisterImageCallBackEx(camera_handle, NULL, NULL);
+        delete thread_pool;
+        thread_pool = nullptr;
+        is_saving = false;
+        is_recording = false;
         closeHDF5();
         return;
     }
 
-    is_saving = true;
-    should_exit = false;
-
-    // Start threads
     task_distribution_thread = std::thread(&RGB::distributeTasksThread, this);
+    ordered_dispatch_thread = std::thread(&RGB::orderedDispatchLoop, this);
     hdf5_writer_thread = std::thread(&RGB::hdf5WriteLoop, this);
 
     printf("RGB Camera started (HDF5 mode, %zu threads).\n", num_threads);
@@ -241,17 +244,17 @@ void RGB::startCapture(const std::string& save_path)
 
 void RGB::stopCapture()
 {
-    // Signal stops
-    should_exit = true;
-    is_saving = false;
+    if (!is_initialized) {
+        return;
+    }
 
-    // Wake up threads
+    should_exit = true;
+    is_recording = false;
     image_semaphore.notifyAll();
-    
-    // Join threads (Consumer first)
-    if (hdf5_writer_thread.joinable()) {
-        hdf5_writer_thread.join();
-        printf("HDF5 writer thread joined.\n");
+
+    if (camera_handle != nullptr) {
+        MV_CC_StopGrabbing(camera_handle);
+        MV_CC_RegisterImageCallBackEx(camera_handle, NULL, NULL);
     }
 
     if (task_distribution_thread.joinable()) {
@@ -259,24 +262,29 @@ void RGB::stopCapture()
         printf("Task distributor thread joined.\n");
     }
 
-    // Stop hardware
-    if (camera_handle != nullptr) {
-        MV_CC_StopGrabbing(camera_handle);
-        MV_CC_RegisterImageCallBackEx(camera_handle, NULL, NULL);
-    }
-
-    // Close HDF5
-    closeHDF5();
-    printf("HDF5 file closed.\n");
-
-    // Cleanup pool
     if (thread_pool) {
         delete thread_pool;
         thread_pool = nullptr;
     }
+    m_workersDone.store(true);
 
+    if (ordered_dispatch_thread.joinable()) {
+        ordered_dispatch_thread.join();
+        printf("Ordered dispatch thread joined.\n");
+    }
+
+    if (hdf5_writer_thread.joinable()) {
+        hdf5_writer_thread.join();
+        printf("HDF5 writer thread joined.\n");
+    }
+
+    closeHDF5();
     clearImageQueue();
+    clearProcessedFrameQueue();
     clearHDF5Queue();
+    is_saving = false;
+
+    printf("HDF5 file closed.\n");
 }
 
 void RGB::getLatestFrame(cv::Mat* output_frame)
@@ -288,9 +296,11 @@ void RGB::getLatestFrame(cv::Mat* output_frame)
     }
 }
 
-// =============================================
-// Thread Functions
-// =============================================
+void RGB::setFrameReadyCallback(FrameReadyCallback callback)
+{
+    std::lock_guard<std::mutex> lock(callback_mutex);
+    m_frameReadyCallback = std::move(callback);
+}
 
 void RGB::imageCallback(unsigned char* image_data, MV_FRAME_OUT_INFO_EX* frame_info, void* user_data)
 {
@@ -306,9 +316,9 @@ void RGB::imageCallback(unsigned char* image_data, MV_FRAME_OUT_INFO_EX* frame_i
     image_node->data_length = frame_info->nFrameLenEx;
     image_node->width = frame_info->nWidth;
     image_node->height = frame_info->nHeight;
-    image_node->frame_number = frame_info->nFrameNum; // 记录帧号
+    image_node->frame_number = frame_info->nFrameNum;
 
-    image_node->image_data = (unsigned char*)malloc(image_node->data_length);
+    image_node->image_data = static_cast<unsigned char*>(malloc(image_node->data_length));
     if (!image_node->image_data) {
         delete image_node;
         return;
@@ -321,14 +331,18 @@ void RGB::imageCallback(unsigned char* image_data, MV_FRAME_OUT_INFO_EX* frame_i
 
 void RGB::distributeTasksThread()
 {
-    while (is_saving || !image_queue.empty()) {
-        image_semaphore.wait(1); // wait with timeout to check is_saving
+    while (!should_exit || !image_queue.empty()) {
+        image_semaphore.wait(1);
 
-        if (should_exit && image_queue.empty()) break;
+        if (should_exit && image_queue.empty()) {
+            break;
+        }
 
         ImageNode* image_node = nullptr;
         if (!image_queue.try_pop(image_node) || image_node == nullptr) {
-            if (!is_saving && image_queue.empty()) break;
+            if (should_exit && image_queue.empty()) {
+                break;
+            }
             continue;
         }
 
@@ -337,90 +351,157 @@ void RGB::distributeTasksThread()
                 processAndQueueFrame(image_node);
                 delete image_node;
             });
-        } else {
+        }
+        else {
             processAndQueueFrame(image_node);
             delete image_node;
         }
     }
+
     printf("Task distribution thread exited.\n");
 }
 
 void RGB::processAndQueueFrame(ImageNode* image_node)
 {
-    size_t rgb_buffer_size = image_node->width * image_node->height * 3;
-    unsigned char* local_rgb_buffer = (unsigned char*)malloc(rgb_buffer_size);
+    const size_t rgb_buffer_size = image_node->width * image_node->height * 3;
+    unsigned char* local_rgb_buffer = static_cast<unsigned char*>(malloc(rgb_buffer_size));
     if (!local_rgb_buffer) {
-        if(image_node->image_data) free(image_node->image_data);
-        image_node->image_data = nullptr;
         return;
     }
 
     MV_CC_PIXEL_CONVERT_PARAM convert_params = { 0 };
     convert_params.enSrcPixelType = image_node->pixel_type;
-    convert_params.enDstPixelType = PixelType_Gvsp_BGR8_Packed; 
+    convert_params.enDstPixelType = PixelType_Gvsp_BGR8_Packed;
     convert_params.nWidth = image_node->width;
     convert_params.nHeight = image_node->height;
     convert_params.nSrcDataLen = image_node->data_length;
     convert_params.pSrcData = image_node->image_data;
     convert_params.pDstBuffer = local_rgb_buffer;
-    convert_params.nDstBufferSize = rgb_buffer_size;
+    convert_params.nDstBufferSize = static_cast<unsigned int>(rgb_buffer_size);
 
-    int result = MV_CC_ConvertPixelType(camera_handle, &convert_params);
+    const int result = MV_CC_ConvertPixelType(camera_handle, &convert_params);
     if (MV_OK != result) {
         free(local_rgb_buffer);
-        if(image_node->image_data) free(image_node->image_data);
-        image_node->image_data = nullptr;
         return;
     }
 
-    // Create wrapper
-    cv::Mat image_wrapper(image_node->height, image_node->width, CV_8UC3, local_rgb_buffer);
-
-    // Create ProcessedFrame (Deep Copy)
-    ProcessedFrame* p_frame = new ProcessedFrame();
-    cv::flip(image_wrapper, p_frame->frame, 0);
-    p_frame->frame_number = image_node->frame_number; // 传递帧号
-
-    // Push to HDF5 Queue
-    hdf5_write_queue.push(p_frame);
-
-    // Push to Display Stack
-    {
-        std::lock_guard<std::mutex> lock(display_mutex);
-        display_stack.push(p_frame->frame);
+    if (image_node->image_data) {
+        free(image_node->image_data);
+        image_node->image_data = nullptr;
     }
 
+    cv::Mat image_wrapper(image_node->height, image_node->width, CV_8UC3, local_rgb_buffer);
+
+    ProcessedFrame* processed = new ProcessedFrame();
+    cv::flip(image_wrapper, processed->frame, 0);
+    processed->frame_number = image_node->frame_number;
+
+    processed_frame_queue.push(processed);
+
     free(local_rgb_buffer);
-    if(image_node->image_data) free(image_node->image_data);
-    image_node->image_data = nullptr;
+}
+
+void RGB::dispatchProcessedFrame(ProcessedFrame* frame)
+{
+    if (!frame) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(display_mutex);
+        display_stack.push(frame->frame);
+    }
+
+    FrameReadyCallback callbackCopy;
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex);
+        callbackCopy = m_frameReadyCallback;
+    }
+
+    if (callbackCopy) {
+        callbackCopy(frame->frame, frame->frame_number);
+    }
+
+    hdf5_write_queue.push(frame);
+}
+
+void RGB::orderedDispatchLoop()
+{
+    std::map<unsigned int, ProcessedFrame*> pendingFrames;
+    bool sequenceInitialized = false;
+    unsigned int nextFrameToDispatch = 0;
+    const size_t maxGapBuffer = 8;
+
+    while (!m_workersDone.load() || !processed_frame_queue.empty() || !pendingFrames.empty()) {
+        ProcessedFrame* frame = nullptr;
+        if (processed_frame_queue.try_pop(frame) && frame) {
+            auto inserted = pendingFrames.emplace(frame->frame_number, frame);
+            if (!inserted.second) {
+                delete frame;
+            }
+        }
+        else if (!m_workersDone.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        if (!sequenceInitialized && !pendingFrames.empty()) {
+            nextFrameToDispatch = pendingFrames.begin()->first;
+            sequenceInitialized = true;
+        }
+
+        if (!sequenceInitialized) {
+            continue;
+        }
+
+        while (true) {
+            auto it = pendingFrames.find(nextFrameToDispatch);
+            if (it == pendingFrames.end()) {
+                break;
+            }
+
+            dispatchProcessedFrame(it->second);
+            pendingFrames.erase(it);
+            ++nextFrameToDispatch;
+        }
+
+        if (!pendingFrames.empty() && pendingFrames.size() > maxGapBuffer) {
+            nextFrameToDispatch = pendingFrames.begin()->first;
+        }
+    }
+
+    for (auto& item : pendingFrames) {
+        dispatchProcessedFrame(item.second);
+    }
+    pendingFrames.clear();
+
+    m_dispatchDone.store(true);
+    printf("Ordered dispatch thread exited.\n");
 }
 
 void RGB::hdf5WriteLoop()
 {
     printf("HDF5 writer thread started.\n");
-    while (is_saving || !hdf5_write_queue.empty())
-    {
+
+    while (!m_dispatchDone.load() || !hdf5_write_queue.empty()) {
         ProcessedFrame* frame_to_save = nullptr;
         if (hdf5_write_queue.try_pop(frame_to_save)) {
             if (frame_to_save) {
                 try {
                     extendAndWriteHDF5(frame_to_save);
-                } catch (H5::Exception& e) {
+                }
+                catch (H5::Exception& e) {
                     printf("HDF5 write error: %s\n", e.getCDetailMsg());
                 }
                 delete frame_to_save;
             }
-        } else {
-            if (!is_saving) break;
+        }
+        else {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     }
+
     printf("HDF5 writer thread exiting.\n");
 }
-
-// =============================================
-// HDF5 Implementation
-// =============================================
 
 bool RGB::initializeHDF5(const std::string& base_path)
 {
@@ -431,55 +512,51 @@ bool RGB::initializeHDF5(const std::string& base_path)
         nRet = MV_CC_GetIntValue(camera_handle, "Height", &height_info);
         if (nRet != MV_OK) return false;
 
-        uint64_t width = width_info.nCurValue;
-        uint64_t height = height_info.nCurValue;
-        unsigned int channels = 3;
+        const uint64_t width = width_info.nCurValue;
+        const uint64_t height = height_info.nCurValue;
+        const unsigned int channels = 3;
 
-        std::string h5_filename = base_path + "/rgb_data.h5";
+        const std::string h5_filename = base_path + "/rgb_data.h5";
         h5_file = std::make_unique<H5::H5File>(h5_filename, H5F_ACC_TRUNC);
 
         H5::Group rgb_group = h5_file->createGroup("/rgb");
 
-        // 1. Setup Image Dataset
-        hsize_t rgb_dims[4] = { 0, (hsize_t)height, (hsize_t)width, (hsize_t)channels };
-        hsize_t rgb_maxdims[4] = { H5S_UNLIMITED, (hsize_t)height, (hsize_t)width, (hsize_t)channels };
+        hsize_t rgb_dims[4] = { 0, static_cast<hsize_t>(height), static_cast<hsize_t>(width), static_cast<hsize_t>(channels) };
+        hsize_t rgb_maxdims[4] = { H5S_UNLIMITED, static_cast<hsize_t>(height), static_cast<hsize_t>(width), static_cast<hsize_t>(channels) };
         H5::DataSpace rgb_dataspace(4, rgb_dims, rgb_maxdims);
 
         H5::DSetCreatPropList rgb_props;
-        hsize_t chunk_dims[4] = { 1, (hsize_t)height, (hsize_t)width, (hsize_t)channels };
+        hsize_t chunk_dims[4] = { 1, static_cast<hsize_t>(height), static_cast<hsize_t>(width), static_cast<hsize_t>(channels) };
         rgb_props.setChunk(4, chunk_dims);
-        // rgb_props.setDeflate(6); // Optional compression
 
         h5_rgb_dataset = rgb_group.createDataSet("frames", H5::PredType::NATIVE_UINT8, rgb_dataspace, rgb_props);
-        
+
         h5_rgb_dims[0] = 0;
         h5_rgb_dims[1] = height;
         h5_rgb_dims[2] = width;
         h5_rgb_dims[3] = channels;
 
-        // 2. [新增] Setup Frame Number Dataset
         hsize_t fn_dims[1] = { 0 };
         hsize_t fn_maxdims[1] = { H5S_UNLIMITED };
         H5::DataSpace fn_dataspace(1, fn_dims, fn_maxdims);
 
         H5::DSetCreatPropList fn_props;
-        hsize_t fn_chunk_dims[1] = { 100 }; // Chunk size 100
+        hsize_t fn_chunk_dims[1] = { 100 };
         fn_props.setChunk(1, fn_chunk_dims);
 
-        // Use NATIVE_UINT64 for storage to be safe and consistent with large counts
         h5_frame_num_dataset = rgb_group.createDataSet("frame_nums", H5::PredType::NATIVE_UINT64, fn_dataspace, fn_props);
-
-    } catch (H5::Exception& e) {
+    }
+    catch (H5::Exception& e) {
         printf("Failed to initialize HDF5: %s\n", e.getCDetailMsg());
         return false;
     }
+
     return true;
 }
 
 void RGB::extendAndWriteHDF5(ProcessedFrame* frame)
 {
     try {
-        // 1. Write Image
         h5_rgb_dims[0]++;
         h5_rgb_dataset.extend(h5_rgb_dims);
 
@@ -491,7 +568,6 @@ void RGB::extendAndWriteHDF5(ProcessedFrame* frame)
         H5::DataSpace img_mem_space(4, img_slab_dims, NULL);
         h5_rgb_dataset.write(frame->frame.data, H5::PredType::NATIVE_UINT8, img_mem_space, img_file_space);
 
-        // 2. [新增] Write Frame Number
         hsize_t fn_dims[1] = { h5_rgb_dims[0] };
         h5_frame_num_dataset.extend(fn_dims);
 
@@ -501,10 +577,9 @@ void RGB::extendAndWriteHDF5(ProcessedFrame* frame)
         fn_file_space.selectHyperslab(H5S_SELECT_SET, fn_slab_dims, fn_offset);
 
         H5::DataSpace fn_mem_space(1, fn_slab_dims, NULL);
-        // Write using NATIVE_UINT (from memory) to NATIVE_UINT64 (in file)
         h5_frame_num_dataset.write(&frame->frame_number, H5::PredType::NATIVE_UINT, fn_mem_space, fn_file_space);
-
-    } catch (H5::Exception& e) {
+    }
+    catch (H5::Exception& e) {
         printf("HDF5 extend/write error: %s\n", e.getCDetailMsg());
     }
 }
@@ -517,8 +592,7 @@ void RGB::closeHDF5()
             h5_rgb_dataset.close();
             h5_rgb_dataset = H5::DataSet();
         }
-        
-        // [新增] Close Frame Number Dataset
+
         if (h5_frame_num_dataset.getId() >= 0) {
             h5_frame_num_dataset.close();
             h5_frame_num_dataset = H5::DataSet();
@@ -528,7 +602,8 @@ void RGB::closeHDF5()
             h5_file->close();
             h5_file.reset();
         }
-    } catch (H5::Exception& e) {
+    }
+    catch (H5::Exception& e) {
         printf("Error closing HDF5 file: %s\n", e.getCDetailMsg());
     }
 }
